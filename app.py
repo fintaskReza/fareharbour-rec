@@ -4,7 +4,8 @@ FareHarbour - QuickBooks Reconciliation Tool
 Main entry point for Streamlit deployment
 """
 
+# Import and run the main function from reconciliation_app
 from reconciliation_app import main
 
-if __name__ == "__main__":
-    main() 
+# Call main function directly (Streamlit will handle the execution)
+main() 
