@@ -218,14 +218,18 @@ def extract_mapping_items(df):
         st.error(f"❌ Error extracting mapping items: {str(e)}")
         return [], [], []
 
-def fetch_quickbooks_accounts():
+def fetch_quickbooks_accounts(asset_accounts_only=False):
     """Fetch QuickBooks accounts from API"""
     if requests is None:
         st.error("❌ Requests library not available. Cannot fetch QuickBooks accounts.")
         return None
 
     try:
-        webhook_url = "https://n8n.fintask.ie/webhook/b25e21c8-fbf1-4cea-9fff-bf682956b0c1"
+        # Use specific webhook for asset accounts, general webhook for all accounts
+        if asset_accounts_only:
+            webhook_url = "https://n8n.fintask.ie/webhook/ec29217c-05bf-4629-98d2-a2eb9034aebf"
+        else:
+            webhook_url = "https://n8n.fintask.ie/webhook/b25e21c8-fbf1-4cea-9fff-bf682956b0c1"
 
         response = requests.get(webhook_url, timeout=30)
         response.raise_for_status()
@@ -644,7 +648,7 @@ def refresh_quickbooks_accounts():
 def get_asset_accounts():
     """Get only asset accounts from QuickBooks API"""
     try:
-        accounts_data = fetch_quickbooks_accounts()
+        accounts_data = fetch_quickbooks_accounts(asset_accounts_only=True)
 
         if accounts_data:
             # Categorize accounts and return only asset accounts
@@ -676,12 +680,6 @@ def get_quickbooks_accounts():
 
 def create_tour_revenue_mappings_table(tours_list):
     """Create editable table for tour to revenue account mappings"""
-    existing_mappings = {
-        mapping['fareharbour_item']: mapping
-        for mapping in st.session_state.qb_mappings_data
-        if mapping['mapping_type'] == 'tour_revenue'
-    }
-
     qb_accounts = get_quickbooks_accounts()
     revenue_accounts = qb_accounts.get('Revenue Accounts', [])
 
@@ -689,16 +687,34 @@ def create_tour_revenue_mappings_table(tours_list):
         st.info("💡 Upload a sales CSV to populate tour mappings automatically.")
         return
 
+    # Get existing mappings for this type
+    existing_mappings = {
+        mapping['fareharbour_item']: mapping
+        for mapping in st.session_state.qb_mappings_data
+        if mapping['mapping_type'] == 'tour_revenue'
+    }
+
+    # Prepare data for data editor - ensure consistency with session state
     mappings_data = []
     for tour in tours_list:
         existing = existing_mappings.get(tour, {})
+        # Always use the value from session state if it exists, otherwise empty
+        qb_account = existing.get('quickbooks_account', '') if existing else ''
         mappings_data.append({
             'Tour Name': tour,
-            'QuickBooks Account': existing.get('quickbooks_account', ''),
-            'Status': 'Mapped' if existing else 'Unmapped'
+            'QuickBooks Account': qb_account,
+            'Status': 'Mapped' if existing and qb_account else 'Unmapped'
         })
 
     if mappings_data:
+        # Create a unique key for this session to avoid conflicts
+        editor_key = f"tour_mappings_editor_{len(tours_list)}_{hash(str(tours_list))}"
+
+        # Use on_change callback to handle updates immediately
+        def on_tour_mapping_change():
+            # This will be called when data changes
+            pass
+
         edited_df = st.data_editor(
             pd.DataFrame(mappings_data),
             use_container_width=True,
@@ -710,30 +726,36 @@ def create_tour_revenue_mappings_table(tours_list):
                 ),
                 "Status": st.column_config.TextColumn("Status", disabled=True, width="small")
             },
-            key="tour_mappings_editor"
+            key=editor_key,
+            on_change=on_tour_mapping_change
         )
 
+        # Process changes and update session state
+        changes_made = False
         for idx, row in edited_df.iterrows():
             tour_name = row['Tour Name']
             qb_account = row['QuickBooks Account']
 
-            mapping = {
-                'mapping_type': 'tour_revenue',
-                'fareharbour_item': tour_name,
-                'quickbooks_account': qb_account,
-                'account_type': 'revenue'
-            }
+            # Only update if there's an actual account selected
+            if qb_account and qb_account.strip():
+                existing = existing_mappings.get(tour_name, {})
+                # Only update if the account has changed
+                if existing.get('quickbooks_account') != qb_account:
+                    mapping = {
+                        'mapping_type': 'tour_revenue',
+                        'fareharbour_item': tour_name,
+                        'quickbooks_account': qb_account,
+                        'account_type': 'revenue'
+                    }
+                    update_session_mapping(mapping)
+                    changes_made = True
 
-            update_session_mapping(mapping)
+        # Force a rerun if changes were made to ensure UI updates
+        if changes_made:
+            st.rerun()
 
 def create_fee_revenue_mappings_table(fees_list):
     """Create editable table for fee to revenue account mappings"""
-    existing_mappings = {
-        mapping['fareharbour_item']: mapping
-        for mapping in st.session_state.qb_mappings_data
-        if mapping['mapping_type'] == 'fee_revenue'
-    }
-
     qb_accounts = get_quickbooks_accounts()
     revenue_accounts = qb_accounts.get('Revenue Accounts', [])
 
@@ -741,16 +763,34 @@ def create_fee_revenue_mappings_table(fees_list):
         st.info("💡 Add fees in Tours & Fees Management to create fee mappings.")
         return
 
+    # Get existing mappings for this type
+    existing_mappings = {
+        mapping['fareharbour_item']: mapping
+        for mapping in st.session_state.qb_mappings_data
+        if mapping['mapping_type'] == 'fee_revenue'
+    }
+
+    # Prepare data for data editor - ensure consistency with session state
     mappings_data = []
     for fee in fees_list:
         existing = existing_mappings.get(fee, {})
+        # Always use the value from session state if it exists, otherwise empty
+        qb_account = existing.get('quickbooks_account', '') if existing else ''
         mappings_data.append({
             'Fee Name': fee,
-            'QuickBooks Account': existing.get('quickbooks_account', ''),
-            'Status': 'Mapped' if existing else 'Unmapped'
+            'QuickBooks Account': qb_account,
+            'Status': 'Mapped' if existing and qb_account else 'Unmapped'
         })
 
     if mappings_data:
+        # Create a unique key for this session to avoid conflicts
+        editor_key = f"fee_mappings_editor_{len(fees_list)}_{hash(str(fees_list))}"
+
+        # Use on_change callback to handle updates immediately
+        def on_fee_mapping_change():
+            # This will be called when data changes
+            pass
+
         edited_df = st.data_editor(
             pd.DataFrame(mappings_data),
             use_container_width=True,
@@ -762,30 +802,36 @@ def create_fee_revenue_mappings_table(fees_list):
                 ),
                 "Status": st.column_config.TextColumn("Status", disabled=True, width="small")
             },
-            key="fee_mappings_editor"
+            key=editor_key,
+            on_change=on_fee_mapping_change
         )
 
+        # Process changes and update session state
+        changes_made = False
         for idx, row in edited_df.iterrows():
             fee_name = row['Fee Name']
             qb_account = row['QuickBooks Account']
 
-            mapping = {
-                'mapping_type': 'fee_revenue',
-                'fareharbour_item': fee_name,
-                'quickbooks_account': qb_account,
-                'account_type': 'revenue'
-            }
+            # Only update if there's an actual account selected
+            if qb_account and qb_account.strip():
+                existing = existing_mappings.get(fee_name, {})
+                # Only update if the account has changed
+                if existing.get('quickbooks_account') != qb_account:
+                    mapping = {
+                        'mapping_type': 'fee_revenue',
+                        'fareharbour_item': fee_name,
+                        'quickbooks_account': qb_account,
+                        'account_type': 'revenue'
+                    }
+                    update_session_mapping(mapping)
+                    changes_made = True
 
-            update_session_mapping(mapping)
+        # Force a rerun if changes were made to ensure UI updates
+        if changes_made:
+            st.rerun()
 
 def create_payment_type_mappings_table(payment_types_list):
     """Create editable table for payment type to bank/clearing account mappings"""
-    existing_mappings = {
-        mapping['fareharbour_item']: mapping
-        for mapping in st.session_state.qb_mappings_data
-        if mapping['mapping_type'] == 'payment_type'
-    }
-
     # Use dedicated asset accounts for payment mappings
     if hasattr(st.session_state, 'qb_asset_accounts'):
         asset_accounts = st.session_state.qb_asset_accounts
@@ -807,16 +853,34 @@ def create_payment_type_mappings_table(payment_types_list):
         st.warning("⚠️ **Asset accounts not loaded yet!** Payment type dropdowns will show fallback accounts.")
         st.info("💰 Click 'Load Asset Accounts' in the sidebar to get real QuickBooks asset accounts for payment mappings.")
 
+    # Get existing mappings for this type
+    existing_mappings = {
+        mapping['fareharbour_item']: mapping
+        for mapping in st.session_state.qb_mappings_data
+        if mapping['mapping_type'] == 'payment_type'
+    }
+
+    # Prepare data for data editor - ensure consistency with session state
     mappings_data = []
     for payment_type in payment_types_list:
         existing = existing_mappings.get(payment_type, {})
+        # Always use the value from session state if it exists, otherwise empty
+        qb_account = existing.get('quickbooks_account', '') if existing else ''
         mappings_data.append({
             'Payment Type': payment_type,
-            'QuickBooks Account': existing.get('quickbooks_account', ''),
-            'Status': 'Mapped' if existing else 'Unmapped'
+            'QuickBooks Account': qb_account,
+            'Status': 'Mapped' if existing and qb_account else 'Unmapped'
         })
 
     if mappings_data:
+        # Create a unique key for this session to avoid conflicts
+        editor_key = f"payment_mappings_editor_{len(payment_types_list)}_{hash(str(payment_types_list))}"
+
+        # Use on_change callback to handle updates immediately
+        def on_payment_mapping_change():
+            # This will be called when data changes
+            pass
+
         edited_df = st.data_editor(
             pd.DataFrame(mappings_data),
             use_container_width=True,
@@ -828,21 +892,33 @@ def create_payment_type_mappings_table(payment_types_list):
                 ),
                 "Status": st.column_config.TextColumn("Status", disabled=True, width="small")
             },
-            key="payment_mappings_editor"
+            key=editor_key,
+            on_change=on_payment_mapping_change
         )
 
+        # Process changes and update session state
+        changes_made = False
         for idx, row in edited_df.iterrows():
             payment_type = row['Payment Type']
             qb_account = row['QuickBooks Account']
 
-            mapping = {
-                'mapping_type': 'payment_type',
-                'fareharbour_item': payment_type,
-                'quickbooks_account': qb_account,
-                'account_type': 'asset'
-            }
+            # Only update if there's an actual account selected
+            if qb_account and qb_account.strip():
+                existing = existing_mappings.get(payment_type, {})
+                # Only update if the account has changed
+                if existing.get('quickbooks_account') != qb_account:
+                    mapping = {
+                        'mapping_type': 'payment_type',
+                        'fareharbour_item': payment_type,
+                        'quickbooks_account': qb_account,
+                        'account_type': 'asset'
+                    }
+                    update_session_mapping(mapping)
+                    changes_made = True
 
-            update_session_mapping(mapping)
+        # Force a rerun if changes were made to ensure UI updates
+        if changes_made:
+            st.rerun()
 
 def update_session_mapping(mapping):
     """Update mapping in session state"""

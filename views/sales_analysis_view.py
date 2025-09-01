@@ -194,9 +194,36 @@ def create_sales_pivot_analysis(df):
                     )
 
             with col3:
-                if st.button("📚 Export QB Journal", help="Generate QuickBooks journal entries"):
-                    journal_df = create_quickbooks_journal(pivot_data, filtered_df)
+                if st.button("📚 Export QB Journal", help="Generate QuickBooks journal entries with proper account mappings"):
+                    # Show mapping status before generating
+                    qb_mappings = get_quickbooks_mappings()
+                    tours_mapped = len(qb_mappings['tour_revenue'])
+                    fees_mapped = len(qb_mappings['fee_revenue'])
+                    payments_mapped = len(qb_mappings['payment_type'])
+
+                    with st.expander("🔗 Mapping Status", expanded=True):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Tour Mappings", tours_mapped)
+                        with col2:
+                            st.metric("Fee Mappings", fees_mapped)
+                        with col3:
+                            st.metric("Payment Mappings", payments_mapped)
+
+                        if tours_mapped == 0 or payments_mapped == 0:
+                            st.warning("⚠️ Some mappings are missing. Journal entries may use fallback account names.")
+
+                    journal_df = create_enhanced_quickbooks_journal(pivot_data, filtered_df)
                     if not journal_df.empty:
+                        # Show journal summary
+                        unique_entries = journal_df['Entry Number'].nunique()
+                        total_line_items = len(journal_df)
+                        total_credits = pd.to_numeric(journal_df['Credit'].replace('', '0'), errors='coerce').sum()
+                        total_debits = pd.to_numeric(journal_df['Debit'].replace('', '0'), errors='coerce').sum()
+
+                        st.success(f"✅ Generated {unique_entries} consolidated journal entry with {total_line_items} line items")
+                        st.info(f"💰 Total Credits: ${total_credits:,.2f} | Total Debits: ${total_debits:,.2f}")
+
                         csv = journal_df.to_csv(index=False)
                         st.download_button(
                             label="💾 Download Journal CSV",
@@ -208,6 +235,8 @@ def create_sales_pivot_analysis(df):
                         # Show preview of journal entries
                         with st.expander("🔍 Preview Journal Entries"):
                             st.dataframe(journal_df, use_container_width=True)
+                    else:
+                        st.warning("⚠️ No journal entries generated. Please check your QuickBooks mappings and data.")
         else:
             st.warning("⚠️ No data available for pivot table creation.")
     else:
@@ -346,14 +375,65 @@ def calculate_fee_splits(pivot_df):
         st.error(f"❌ Error calculating fee splits: {str(e)}")
         return pivot_df
 
-def create_quickbooks_journal(pivot_df, raw_df):
-    """Create QuickBooks journal entries from pivot table data with payment type splits"""
+def get_quickbooks_mappings():
+    """Retrieve QuickBooks account mappings from database"""
+    try:
+        mappings = execute_query("""
+            SELECT mapping_type, fareharbour_item, quickbooks_account, account_type, quickbooks_account_id
+            FROM quickbooks_mappings
+            WHERE is_active = true
+            ORDER BY mapping_type, fareharbour_item
+        """)
+
+        if mappings:
+            mapping_dict = {
+                'tour_revenue': {},
+                'fee_revenue': {},
+                'payment_type': {}
+            }
+
+            for mapping in mappings:
+                mapping_type, fareharbour_item, quickbooks_account, account_type, quickbooks_account_id = mapping
+                mapping_dict[mapping_type][fareharbour_item] = {
+                    'account': quickbooks_account,
+                    'account_type': account_type,
+                    'account_id': quickbooks_account_id
+                }
+
+            return mapping_dict
+        else:
+            st.warning("⚠️ No QuickBooks mappings found in database. Using fallback mappings.")
+            return get_fallback_mappings()
+
+    except Exception as e:
+        st.error(f"❌ Error retrieving QuickBooks mappings: {str(e)}")
+        return get_fallback_mappings()
+
+def get_fallback_mappings():
+    """Fallback mappings when database is unavailable"""
+    return {
+        'tour_revenue': {},
+        'fee_revenue': {},
+        'payment_type': {
+            'Credit Card': {'account': 'Credit Card Clearing', 'account_type': 'asset', 'account_id': ''},
+            'Cash': {'account': 'Cash - Operating', 'account_type': 'asset', 'account_id': ''},
+            'PayPal': {'account': 'PayPal Clearing', 'account_type': 'asset', 'account_id': ''},
+            'Check': {'account': 'Undeposited Funds', 'account_type': 'asset', 'account_id': ''},
+            'Bank Transfer': {'account': 'Bank Transfer Clearing', 'account_type': 'asset', 'account_id': ''},
+        }
+    }
+
+def create_enhanced_quickbooks_journal(pivot_df, raw_df):
+    """Create enhanced QuickBooks journal entries with proper account mappings and VAT handling"""
     try:
         journal_entries = []
         entry_date = datetime.now().strftime('%Y-%m-%d')
 
+        # Retrieve QuickBooks account mappings
+        qb_mappings = get_quickbooks_mappings()
+
         # Get fee mappings for detailed breakdown
-        mappings = execute_query("""
+        fee_mappings = execute_query("""
             SELECT t.name as tour_name, f.name as fee_name, f.per_person_amount
             FROM tour_fees tf
             JOIN tours t ON tf.tour_id = t.id
@@ -361,143 +441,120 @@ def create_quickbooks_journal(pivot_df, raw_df):
             ORDER BY t.name, f.name
         """)
 
-        mappings_df = pd.DataFrame(mappings, columns=['tour_name', 'fee_name', 'per_person_amount']) if mappings else pd.DataFrame()
-        if not mappings_df.empty:
-            mappings_df['per_person_amount'] = pd.to_numeric(mappings_df['per_person_amount'], errors='coerce').fillna(0)
+        fee_mappings_df = pd.DataFrame(fee_mappings, columns=['tour_name', 'fee_name', 'per_person_amount']) if fee_mappings else pd.DataFrame()
+        if not fee_mappings_df.empty:
+            fee_mappings_df['per_person_amount'] = pd.to_numeric(fee_mappings_df['per_person_amount'], errors='coerce').fillna(0)
 
         entry_number = 1
+        total_vat_amount = 0
 
-        # Process each tour in the pivot table
+        # Calculate total VAT across all tours
         for _, row in pivot_df.iterrows():
             tour_name = row['Tour Name']
-            total_guests = pd.to_numeric(row.get('Total Guests', 0), errors='coerce')
-            tour_revenue = pd.to_numeric(row.get('Tour Revenue (Net of Fees)', 0), errors='coerce')
-            total_fee_revenue = pd.to_numeric(row.get('Total Fee Revenue', 0), errors='coerce')
-            receivable_affiliate = pd.to_numeric(row.get('Receivable from Affiliate', 0), errors='coerce')
-            received_affiliate = pd.to_numeric(row.get('Received from Affiliate', 0), errors='coerce')
+            subtotal_ex_tax = pd.to_numeric(row.get('Subtotal (Ex-Tax)', 0), errors='coerce')
+            total_revenue = pd.to_numeric(row.get('Total Revenue', 0), errors='coerce')
 
-            # Skip if no significant amounts
-            if tour_revenue <= 0 and total_fee_revenue <= 0 and receivable_affiliate <= 0 and received_affiliate <= 0:
-                continue
+            # Calculate VAT amount (difference between total and ex-tax)
+            vat_amount = total_revenue - subtotal_ex_tax if total_revenue > subtotal_ex_tax else 0
+            if vat_amount > 0:
+                total_vat_amount += vat_amount
 
-            # Get payment breakdown for this tour from raw data
+        # Calculate total payments by payment type across all transactions
+        total_payments_by_type = {}
+        for _, row in pivot_df.iterrows():
+            tour_name = row['Tour Name']
             tour_transactions = raw_df[raw_df['Item'] == tour_name].copy()
 
             if not tour_transactions.empty:
-                # Calculate payment type splits for this tour
-                payment_splits = calculate_payment_type_splits(tour_transactions, tour_revenue, total_fee_revenue)
+                tour_payment_breakdown = calculate_payment_breakdown(tour_transactions)
+                for payment_type, amount in tour_payment_breakdown.items():
+                    if payment_type in total_payments_by_type:
+                        total_payments_by_type[payment_type] += amount
+                    else:
+                        total_payments_by_type[payment_type] = amount
 
-                # 1. TOUR REVENUE ENTRIES (split by payment type)
-                if tour_revenue > 0:
-                    for payment_type, amount in payment_splits['tour_revenue'].items():
-                        if amount > 0:
-                            # Credit: Tour Revenue
-                            journal_entries.append({
-                                'Entry Number': f'JE{entry_number:04d}',
-                                'Date': entry_date,
-                                'Account': f'Tour Revenue - {tour_name}',
-                                'Description': f'Tour revenue for {tour_name} - {payment_type}',
-                                'Debit': '',
-                                'Credit': f'{amount:.2f}',
-                                'Memo': f'Net tour revenue after fees - {payment_type}'
-                            })
+        # Create ONE consolidated journal entry
+        je_number = f'JE{entry_number:04d}'
 
-                            # Debit: Payment Type Account
-                            debit_account = get_payment_account(payment_type)
-                            journal_entries.append({
-                                'Entry Number': f'JE{entry_number:04d}',
-                                'Date': entry_date,
-                                'Account': debit_account,
-                                'Description': f'Tour revenue - {payment_type} for {tour_name}',
-                                'Debit': f'{amount:.2f}',
-                                'Credit': '',
-                                'Memo': f'Tour revenue - {payment_type}'
-                            })
-                            entry_number += 1
+        # Calculate total fees by fee type across all tours
+        total_fees_by_type = {}
+        for _, row in pivot_df.iterrows():
+            tour_name = row['Tour Name']
+            total_guests = pd.to_numeric(row.get('Total Guests', 0), errors='coerce')
+            total_fee_revenue = pd.to_numeric(row.get('Total Fee Revenue', 0), errors='coerce')
 
-                # 2. FEE REVENUE ENTRIES (split by payment type and fee type)
-                if not mappings_df.empty and total_fee_revenue > 0:
-                    tour_fees = mappings_df[mappings_df['tour_name'] == tour_name]
+            if not fee_mappings_df.empty and total_fee_revenue > 0:
+                tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour_name]
 
-                    for _, fee_row in tour_fees.iterrows():
-                        fee_amount = fee_row['per_person_amount'] * total_guests
-                        if fee_amount > 0:
-                            fee_name = fee_row['fee_name']
+                for _, fee_row in tour_fees.iterrows():
+                    fee_amount = fee_row['per_person_amount'] * total_guests
+                    if fee_amount > 0:
+                        fee_name = fee_row['fee_name']
+                        if fee_name in total_fees_by_type:
+                            total_fees_by_type[fee_name] += fee_amount
+                        else:
+                            total_fees_by_type[fee_name] = fee_amount
 
-                            # Split fee revenue by payment type
-                            for payment_type, proportion in payment_splits['proportions'].items():
-                                payment_fee_amount = fee_amount * proportion
-                                if payment_fee_amount > 0:
-                                    # Credit: Specific Fee Revenue
-                                    journal_entries.append({
-                                        'Entry Number': f'JE{entry_number:04d}',
-                                        'Date': entry_date,
-                                        'Account': f'Fee Revenue - {fee_name}',
-                                        'Description': f'{fee_name} for {tour_name} - {payment_type}',
-                                        'Debit': '',
-                                        'Credit': f'{payment_fee_amount:.2f}',
-                                        'Memo': f'Fee revenue - {fee_name} - {payment_type}'
-                                    })
+        # REVENUE SIDE (Credits) - All revenue types in one entry
+        for _, row in pivot_df.iterrows():
+            tour_name = row['Tour Name']
+            tour_revenue = pd.to_numeric(row.get('Tour Revenue (Net of Fees)', 0), errors='coerce')
 
-                                    # Debit: Payment Type Account
-                                    debit_account = get_payment_account(payment_type)
-                                    journal_entries.append({
-                                        'Entry Number': f'JE{entry_number:04d}',
-                                        'Date': entry_date,
-                                        'Account': debit_account,
-                                        'Description': f'Fee revenue - {payment_type} for {fee_name}',
-                                        'Debit': f'{payment_fee_amount:.2f}',
-                                        'Credit': '',
-                                        'Memo': f'Fee receivable - {fee_name} - {payment_type}'
-                                    })
-                                    entry_number += 1
-
-            # 3. AFFILIATE ENTRIES (separate from payment splits)
-            if receivable_affiliate > 0:
-                # Debit: Commission Expense, Credit: Accounts Payable to Affiliate
+            # 1. Tour Revenue Credit
+            if tour_revenue > 0:
+                tour_revenue_account = qb_mappings['tour_revenue'].get(tour_name, {}).get('account', f'Tour Revenue - {tour_name}')
                 journal_entries.append({
-                    'Entry Number': f'JE{entry_number:04d}',
+                    'Entry Number': je_number,
                     'Date': entry_date,
-                    'Account': 'Affiliate Commission Expense',
-                    'Description': f'Commission expense for {tour_name}',
-                    'Debit': f'{receivable_affiliate:.2f}',
-                    'Credit': '',
-                    'Memo': f'Affiliate commission - {tour_name}'
-                })
-
-                journal_entries.append({
-                    'Entry Number': f'JE{entry_number:04d}',
-                    'Date': entry_date,
-                    'Account': f'Accounts Payable - Affiliates',
-                    'Description': f'Amount due to affiliate for {tour_name}',
+                    'Account': tour_revenue_account,
+                    'Description': f'{tour_name} revenue',
                     'Debit': '',
-                    'Credit': f'{receivable_affiliate:.2f}',
-                    'Memo': f'Affiliate commission due - {tour_name}'
-                })
-                entry_number += 1
-
-            if received_affiliate > 0:
-                # Debit: Cash, Credit: Accounts Payable to Affiliate
-                journal_entries.append({
-                    'Entry Number': f'JE{entry_number:04d}',
-                    'Date': entry_date,
-                    'Account': 'Cash - Operating',
-                    'Description': f'Payment received from affiliate for {tour_name}',
-                    'Debit': f'{received_affiliate:.2f}',
-                    'Credit': '',
-                    'Memo': f'Affiliate payment received - {tour_name}'
+                    'Credit': f'{tour_revenue:.2f}',
+                    'Memo': f'Tour revenue for {tour_name}'
                 })
 
+        # 2. Fee Revenue Credits (summed by fee type across all tours)
+        for fee_name, total_fee_amount in total_fees_by_type.items():
+            if total_fee_amount > 0:
+                fee_revenue_account = qb_mappings['fee_revenue'].get(fee_name, {}).get('account', f'Fee Revenue - {fee_name}')
                 journal_entries.append({
-                    'Entry Number': f'JE{entry_number:04d}',
+                    'Entry Number': je_number,
                     'Date': entry_date,
-                    'Account': f'Accounts Payable - Affiliates',
-                    'Description': f'Payment from affiliate for {tour_name}',
+                    'Account': fee_revenue_account,
+                    'Description': f'{fee_name}',
                     'Debit': '',
-                    'Credit': f'{received_affiliate:.2f}',
-                    'Memo': f'Affiliate payment - {tour_name}'
+                    'Credit': f'{total_fee_amount:.2f}',
+                    'Memo': f'{fee_name} revenue (all tours)'
                 })
-                entry_number += 1
+
+        # 3. VAT Credit
+        if total_vat_amount > 0:
+            journal_entries.append({
+                'Entry Number': je_number,
+                'Date': entry_date,
+                'Account': 'Sales VAT',
+                'Description': 'VAT on sales revenue',
+                'Debit': '',
+                'Credit': f'{total_vat_amount:.2f}',
+                'Memo': 'VAT collected on sales'
+            })
+
+        # PAYMENT SIDE (Debits) - All payments in one entry
+        for payment_type, total_amount in total_payments_by_type.items():
+            if total_amount > 0:
+                payment_account = qb_mappings['payment_type'].get(payment_type, {}).get('account', get_payment_account(payment_type))
+
+                journal_entries.append({
+                    'Entry Number': je_number,
+                    'Date': entry_date,
+                    'Account': payment_account,
+                    'Description': f'{payment_type} payment',
+                    'Debit': f'{total_amount:.2f}',
+                    'Credit': '',
+                    'Memo': f'Payment received via {payment_type}'
+                })
+
+        entry_number += 1
 
         # Convert to DataFrame
         if journal_entries:
@@ -508,10 +565,39 @@ def create_quickbooks_journal(pivot_df, raw_df):
             return pd.DataFrame()
 
     except Exception as e:
-        st.error(f"❌ Error creating QuickBooks journal: {str(e)}")
+        st.error(f"❌ Error creating enhanced QuickBooks journal: {str(e)}")
         import traceback
         st.error(f"Details: {traceback.format_exc()}")
         return pd.DataFrame()
+
+def calculate_payment_breakdown(transactions):
+    """Calculate payment amounts by payment type for a tour"""
+    try:
+        payment_breakdown = {}
+
+        if 'Payment Type' in transactions.columns:
+            # Group by payment type and sum payment amounts
+            payment_summary = transactions.groupby('Payment Type').agg({
+                'Total Paid': 'sum'
+            }).reset_index()
+
+            for _, row in payment_summary.iterrows():
+                payment_type = row['Payment Type']
+                amount = pd.to_numeric(row['Total Paid'], errors='coerce')
+                if amount > 0:
+                    payment_breakdown[payment_type] = amount
+        else:
+            # Fallback if Payment Type column doesn't exist
+            total_paid = transactions['Total Paid'].sum() if 'Total Paid' in transactions.columns else 0
+            if total_paid > 0:
+                payment_breakdown['Unknown'] = total_paid
+
+        return payment_breakdown
+
+    except Exception as e:
+        # Fallback to single payment type
+        total_paid = transactions['Total Paid'].sum() if 'Total Paid' in transactions.columns else 0
+        return {'Unknown': total_paid} if total_paid > 0 else {}
 
 def calculate_payment_type_splits(transactions, tour_revenue, total_fee_revenue):
     """Calculate how revenue should be split by payment type based on transaction data"""

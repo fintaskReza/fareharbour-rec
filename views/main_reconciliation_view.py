@@ -877,3 +877,4 @@ def main_reconciliation_view():
             - Track transaction counts per booking
             - Export detailed payment reconciliation reports
             """)
+
