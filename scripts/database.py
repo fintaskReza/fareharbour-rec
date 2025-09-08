@@ -65,3 +65,90 @@ def add_quickbooks_account_id_column():
     except Exception as e:
         st.error(f"❌ Error adding QuickBooks account ID column: {str(e)}")
         return False
+
+def save_quickbooks_accounts_to_db(accounts_data):
+    """Save QuickBooks accounts to database"""
+    if not accounts_data:
+        return False
+
+    try:
+        # First, mark all existing accounts as inactive
+        update_query = "UPDATE quickbooks_accounts SET active = false, updated_at = CURRENT_TIMESTAMP"
+        execute_query(update_query)
+
+        # Insert or update accounts
+        for account in accounts_data:
+            account_id = account.get('Id', '')
+            name = account.get('Name', '')
+            fully_qualified_name = account.get('FullyQualifiedName', '')
+            classification = account.get('Classification', '')
+            account_type = account.get('AccountType', '')
+            account_subtype = account.get('AccountSubType', '')
+            active = account.get('Active', True)
+
+            if not account_id or not name:
+                continue
+
+            # Insert or update account
+            insert_query = """
+            INSERT INTO quickbooks_accounts
+            (account_id, name, fully_qualified_name, classification, account_type, account_subtype, active, updated_at)
+            VALUES (:account_id, :name, :fully_qualified_name, :classification, :account_type, :account_subtype, :active, CURRENT_TIMESTAMP)
+            ON CONFLICT (account_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                fully_qualified_name = EXCLUDED.fully_qualified_name,
+                classification = EXCLUDED.classification,
+                account_type = EXCLUDED.account_type,
+                account_subtype = EXCLUDED.account_subtype,
+                active = EXCLUDED.active,
+                updated_at = CURRENT_TIMESTAMP
+            """
+
+            execute_query(insert_query, {
+                'account_id': account_id,
+                'name': name,
+                'fully_qualified_name': fully_qualified_name,
+                'classification': classification,
+                'account_type': account_type,
+                'account_subtype': account_subtype,
+                'active': active
+            })
+
+        return True
+
+    except Exception as e:
+        st.error(f"❌ Error saving QuickBooks accounts to database: {str(e)}")
+        return False
+
+def load_quickbooks_accounts_from_db():
+    """Load QuickBooks accounts from database"""
+    try:
+        query = """
+        SELECT account_id, name, fully_qualified_name, classification, account_type, account_subtype, active
+        FROM quickbooks_accounts
+        WHERE active = true
+        ORDER BY name
+        """
+
+        result = execute_query(query)
+        if result:
+            accounts_data = []
+            for row in result:
+                account = {
+                    'Id': row[0],
+                    'Name': row[1],
+                    'FullyQualifiedName': row[2] or row[1],  # Use name if fully qualified name is null
+                    'Classification': row[3],
+                    'AccountType': row[4],
+                    'AccountSubType': row[5],
+                    'Active': row[6]
+                }
+                accounts_data.append(account)
+
+            return accounts_data
+        else:
+            return []
+
+    except Exception as e:
+        st.error(f"❌ Error loading QuickBooks accounts from database: {str(e)}")
+        return []

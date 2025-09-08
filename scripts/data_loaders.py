@@ -44,8 +44,21 @@ def load_fareharbour_data(uploaded_file):
             df['Total'] = pd.to_numeric(df['Total'].str.replace('$', '').str.replace(',', ''), errors='coerce')
 
         # Convert tax and amount due columns for comparison
-        if 'Total Tax' in df.columns:
-            df['Total Tax'] = pd.to_numeric(df['Total Tax'].str.replace('$', '').str.replace(',', ''), errors='coerce')
+        tax_columns = ['Total Tax', 'Tax Paid', 'Dashboard Tax Rate (5%) Paid']
+        for tax_col in tax_columns:
+            if tax_col in df.columns:
+                df[tax_col] = pd.to_numeric(df[tax_col].str.replace('$', '').str.replace(',', ''), errors='coerce')
+
+        # Convert Subtotal Paid column
+        if 'Subtotal Paid' in df.columns:
+            df['Subtotal Paid'] = pd.to_numeric(df['Subtotal Paid'].str.replace('$', '').str.replace(',', ''), errors='coerce')
+
+        # Convert affiliate columns
+        affiliate_columns = ['Payable to Affiliate', 'Paid to Affiliate', 'Receivable from Affiliate', 'Received from Affiliate']
+        for aff_col in affiliate_columns:
+            if aff_col in df.columns:
+                df[aff_col] = pd.to_numeric(df[aff_col].str.replace('$', '').str.replace(',', ''), errors='coerce')
+
         if 'Amount Due' in df.columns:
             df['Amount Due'] = pd.to_numeric(df['Amount Due'].str.replace('$', '').str.replace(',', ''), errors='coerce')
 

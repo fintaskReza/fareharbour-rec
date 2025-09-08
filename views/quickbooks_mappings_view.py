@@ -12,7 +12,7 @@ except ImportError:
     requests = None
 
 # Import database functions
-from scripts.database import execute_query, add_quickbooks_account_id_column
+from scripts.database import execute_query, add_quickbooks_account_id_column, save_quickbooks_accounts_to_db, load_quickbooks_accounts_from_db
 
 def quickbooks_mappings_page():
     """QuickBooks Account Mappings Page"""
@@ -77,7 +77,11 @@ def quickbooks_mappings_page():
     if st.sidebar.button("💰 Load Asset Accounts", help="Load QuickBooks asset accounts for payment type mappings",
                         type="secondary"):
         with st.spinner("Fetching asset accounts..."):
-            asset_accounts = get_asset_accounts()
+            # Clear existing asset accounts to force API call
+            if hasattr(st.session_state, 'qb_asset_accounts'):
+                del st.session_state.qb_asset_accounts
+
+            asset_accounts = get_asset_accounts(force_api=True)
 
             if asset_accounts:
                 st.sidebar.success(f"✅ Loaded {len(asset_accounts)} asset accounts!")
@@ -104,9 +108,10 @@ def quickbooks_mappings_page():
             for category, acc_list in accounts.items():
                 st.write(f"**{category}**: {len(acc_list)}")
 
-        # Show last refresh time
+        # Show last refresh time and source
         if hasattr(st.session_state, 'qb_accounts_last_fetch'):
-            st.sidebar.caption(f"Last updated: {st.session_state.qb_accounts_last_fetch.strftime('%H:%M:%S')}")
+            source_indicator = " (from DB)" if hasattr(st.session_state, 'qb_accounts_from_db') and st.session_state.qb_accounts_from_db else " (from API)"
+            st.sidebar.caption(f"Last updated: {st.session_state.qb_accounts_last_fetch.strftime('%H:%M:%S')}{source_indicator}")
 
         # Test API connection
         if st.sidebar.button("🔍 Test API Connection", help="Test the QuickBooks API connection"):
@@ -124,12 +129,23 @@ def quickbooks_mappings_page():
     if 'qb_mappings_data' not in st.session_state:
         st.session_state.qb_mappings_data = load_quickbooks_mappings()
 
+    # Ensure mappings are loaded for account extraction
+    if not hasattr(st.session_state, 'qb_mappings_data') or not st.session_state.qb_mappings_data:
+        st.session_state.qb_mappings_data = load_quickbooks_mappings()
+
+    # Debug: Show mappings loaded
+    debug_mode = st.session_state.get('qb_debug_mode', False)
+    if debug_mode:
+        st.write("🐛 **DEBUG: Session state mappings loaded:**", len(st.session_state.qb_mappings_data))
+        tour_count = len([m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'tour_revenue'])
+        st.write(f"🐛 **DEBUG: Tour mappings in session:** {tour_count}")
+
     # Check if QuickBooks accounts have been loaded
     accounts_loaded = hasattr(st.session_state, 'qb_accounts_cache')
 
     if not accounts_loaded:
-        st.warning("⚠️ **No QuickBooks accounts loaded yet!** Please click 'Load QuickBooks Accounts' in the sidebar to fetch your account data before creating mappings.")
-        st.info("💡 This ensures your dropdowns are populated with real QuickBooks account names.")
+        st.info("ℹ️ **QuickBooks accounts not loaded yet.** Your existing mappings are shown below, but dropdown options will be empty until you load accounts from QuickBooks.")
+        st.info("💡 Click 'Load QuickBooks Accounts' in the sidebar to populate dropdowns with real QuickBooks account names.")
 
     # Database column verification
     if debug_mode:
@@ -635,6 +651,11 @@ def refresh_quickbooks_accounts():
         accounts_data = fetch_quickbooks_accounts()
 
         if accounts_data:
+            # Save accounts to database
+            save_result = save_quickbooks_accounts_to_db(accounts_data)
+            if save_result:
+                st.info("💾 QuickBooks accounts saved to database")
+
             categorized_accounts = categorize_quickbooks_accounts(accounts_data)
             st.session_state.qb_accounts_cache = categorized_accounts
             st.session_state.qb_accounts_last_fetch = pd.Timestamp.now()
@@ -645,12 +666,37 @@ def refresh_quickbooks_accounts():
         st.error(f"❌ Error refreshing accounts: {str(e)}")
         return None, None
 
-def get_asset_accounts():
-    """Get only asset accounts from QuickBooks API"""
+def get_asset_accounts(force_api=False):
+    """Get only asset accounts from database, mappings, or QuickBooks API"""
     try:
+        # Check if we already have asset accounts in session state (unless forcing API)
+        if not force_api and hasattr(st.session_state, 'qb_asset_accounts') and st.session_state.qb_asset_accounts:
+            return st.session_state.qb_asset_accounts
+
+        # If not forcing API, try to load from database first
+        if not force_api:
+            accounts_data = load_quickbooks_accounts_from_db()
+            if accounts_data:
+                categorized_accounts = categorize_quickbooks_accounts(accounts_data)
+                asset_accounts = categorized_accounts.get('Asset Accounts', [])
+
+                if asset_accounts:
+                    st.session_state.qb_asset_accounts = asset_accounts
+                    st.session_state.qb_asset_accounts_last_fetch = pd.Timestamp.now()
+                    st.info("📊 Asset accounts loaded from database")
+                    return asset_accounts
+
+        # Note: We no longer load asset accounts from existing mappings to keep dropdowns empty until QBO is loaded
+
+        # Try API (this will always be attempted if force_api=True or no other sources worked)
         accounts_data = fetch_quickbooks_accounts(asset_accounts_only=True)
 
         if accounts_data:
+            # Save to database
+            save_result = save_quickbooks_accounts_to_db(accounts_data)
+            if save_result:
+                st.info("💾 Asset accounts saved to database")
+
             # Categorize accounts and return only asset accounts
             categorized_accounts = categorize_quickbooks_accounts(accounts_data)
 
@@ -663,29 +709,62 @@ def get_asset_accounts():
 
             return st.session_state.qb_asset_accounts
         else:
-            st.warning("⚠️ Failed to fetch asset accounts from API")
+            if force_api:
+                st.warning("⚠️ Failed to fetch asset accounts from QuickBooks API")
             return get_fallback_accounts().get('Asset Accounts', [])
     except Exception as e:
         st.error(f"❌ Error fetching asset accounts: {str(e)}")
         return get_fallback_accounts().get('Asset Accounts', [])
 
 def get_quickbooks_accounts():
-    """Get QuickBooks account list from cache or fallback"""
+    """Get QuickBooks account list from database, cache, or fallback"""
     # Check if we have cached accounts
     if hasattr(st.session_state, 'qb_accounts_cache'):
         return st.session_state.qb_accounts_cache
 
-    # If no cached accounts, return fallback
+    # Try to load from database first
+    accounts_data = load_quickbooks_accounts_from_db()
+    if accounts_data:
+        categorized_accounts = categorize_quickbooks_accounts(accounts_data)
+        st.session_state.qb_accounts_cache = categorized_accounts
+        st.session_state.qb_accounts_last_fetch = pd.Timestamp.now()
+        st.session_state.qb_accounts_from_db = True
+        st.info("📊 QuickBooks accounts loaded from database")
+        return categorized_accounts
+
+    # Note: We no longer load accounts from existing mappings to keep dropdowns empty until QBO is loaded
+
+    # If no mappings either, return fallback
     return get_fallback_accounts()
+
+def get_accounts_from_existing_mappings():
+    """Extract QuickBooks account names from existing mappings to populate dropdowns"""
+    # This function is now disabled - we want dropdowns to be empty until QBO accounts are loaded
+    # The existing mappings are still used to show current selections, but dropdown options
+    # should only come from actual QBO API calls
+    return None
 
 def create_tour_revenue_mappings_table(tours_list):
     """Create editable table for tour to revenue account mappings"""
     qb_accounts = get_quickbooks_accounts()
     revenue_accounts = qb_accounts.get('Revenue Accounts', [])
 
+    # If no CSV uploaded, get tours from existing database mappings
     if not tours_list:
-        st.info("💡 Upload a sales CSV to populate tour mappings automatically.")
-        return
+        # Extract unique tours from existing database mappings
+        tour_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'tour_revenue']
+        tours_list = sorted(list(set(m['fareharbour_item'] for m in tour_mappings)))
+
+        if tours_list:
+            st.info(f"💡 Showing {len(tours_list)} tours from existing database mappings.")
+            # Debug: Show what we found
+            debug_mode = st.session_state.get('qb_debug_mode', False)
+            if debug_mode:
+                st.write("🐛 **DEBUG: Found tours:**", tours_list[:3])
+                st.write("🐛 **DEBUG: Tour mappings:**", tour_mappings[:2])
+        else:
+            st.info("💡 No existing tour mappings found. Upload a sales CSV to create new mappings.")
+            return
 
     # Get existing mappings for this type
     existing_mappings = {
@@ -696,10 +775,16 @@ def create_tour_revenue_mappings_table(tours_list):
 
     # Prepare data for data editor - ensure consistency with session state
     mappings_data = []
+    debug_mode = st.session_state.get('qb_debug_mode', False)
+
     for tour in tours_list:
         existing = existing_mappings.get(tour, {})
         # Always use the value from session state if it exists, otherwise empty
         qb_account = existing.get('quickbooks_account', '') if existing else ''
+
+        if debug_mode:
+            st.write(f"🐛 **DEBUG: Tour '{tour}'** - Existing: {bool(existing)} - QB Account: '{qb_account}'")
+
         mappings_data.append({
             'Tour Name': tour,
             'QuickBooks Account': qb_account,
@@ -715,6 +800,9 @@ def create_tour_revenue_mappings_table(tours_list):
             # This will be called when data changes
             pass
 
+        # Ensure current mapped values are in dropdown options for display
+        all_revenue_options = list(set(revenue_accounts + [row['QuickBooks Account'] for row in mappings_data if row['QuickBooks Account']]))
+
         edited_df = st.data_editor(
             pd.DataFrame(mappings_data),
             use_container_width=True,
@@ -722,7 +810,7 @@ def create_tour_revenue_mappings_table(tours_list):
             column_config={
                 "Tour Name": st.column_config.TextColumn("Tour Name", disabled=True, width="medium"),
                 "QuickBooks Account": st.column_config.SelectboxColumn(
-                    "QuickBooks Account", options=revenue_accounts, width="large"
+                    "QuickBooks Account", options=all_revenue_options, width="large"
                 ),
                 "Status": st.column_config.TextColumn("Status", disabled=True, width="small")
             },
@@ -759,9 +847,17 @@ def create_fee_revenue_mappings_table(fees_list):
     qb_accounts = get_quickbooks_accounts()
     revenue_accounts = qb_accounts.get('Revenue Accounts', [])
 
+    # If no fees from CSV/database, get fees from existing mappings
     if not fees_list:
-        st.info("💡 Add fees in Tours & Fees Management to create fee mappings.")
-        return
+        # Extract unique fees from existing database mappings
+        fee_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'fee_revenue']
+        fees_list = sorted(list(set(m['fareharbour_item'] for m in fee_mappings)))
+
+        if fees_list:
+            st.info(f"💡 Showing {len(fees_list)} fees from existing database mappings. Add fees in Tours & Fees Management to expand this list.")
+        else:
+            st.info("💡 Add fees in Tours & Fees Management to create fee mappings.")
+            return
 
     # Get existing mappings for this type
     existing_mappings = {
@@ -791,6 +887,9 @@ def create_fee_revenue_mappings_table(fees_list):
             # This will be called when data changes
             pass
 
+        # Ensure current mapped values are in dropdown options for display
+        all_revenue_options = list(set(revenue_accounts + [row['QuickBooks Account'] for row in mappings_data if row['QuickBooks Account']]))
+
         edited_df = st.data_editor(
             pd.DataFrame(mappings_data),
             use_container_width=True,
@@ -798,7 +897,7 @@ def create_fee_revenue_mappings_table(fees_list):
             column_config={
                 "Fee Name": st.column_config.TextColumn("Fee Name", disabled=True, width="medium"),
                 "QuickBooks Account": st.column_config.SelectboxColumn(
-                    "QuickBooks Account", options=revenue_accounts, width="large"
+                    "QuickBooks Account", options=all_revenue_options, width="large"
                 ),
                 "Status": st.column_config.TextColumn("Status", disabled=True, width="small")
             },
@@ -840,9 +939,17 @@ def create_payment_type_mappings_table(payment_types_list):
         qb_accounts = get_quickbooks_accounts()
         asset_accounts = qb_accounts.get('Asset Accounts', [])
 
+    # If no payment types from CSV, get payment types from existing mappings
     if not payment_types_list:
-        st.info("💡 Upload a sales CSV to populate payment type mappings automatically.")
-        return
+        # Extract unique payment types from existing database mappings
+        payment_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'payment_type']
+        payment_types_list = sorted(list(set(m['fareharbour_item'] for m in payment_mappings)))
+
+        if payment_types_list:
+            st.info(f"💡 Showing {len(payment_types_list)} payment types from existing database mappings. Upload a sales CSV to add new payment types automatically.")
+        else:
+            st.info("💡 Upload a sales CSV to populate payment type mappings automatically.")
+            return
 
     # Check if asset accounts are loaded
     asset_accounts_loaded = hasattr(st.session_state, 'qb_asset_accounts') and st.session_state.qb_asset_accounts
@@ -881,6 +988,9 @@ def create_payment_type_mappings_table(payment_types_list):
             # This will be called when data changes
             pass
 
+        # Ensure current mapped values are in dropdown options for display
+        all_asset_options = list(set(asset_accounts + [row['QuickBooks Account'] for row in mappings_data if row['QuickBooks Account']]))
+
         edited_df = st.data_editor(
             pd.DataFrame(mappings_data),
             use_container_width=True,
@@ -888,7 +998,7 @@ def create_payment_type_mappings_table(payment_types_list):
             column_config={
                 "Payment Type": st.column_config.TextColumn("Payment Type", disabled=True, width="medium"),
                 "QuickBooks Account": st.column_config.SelectboxColumn(
-                    "QuickBooks Account", options=asset_accounts, width="large"
+                    "QuickBooks Account", options=all_asset_options, width="large"
                 ),
                 "Status": st.column_config.TextColumn("Status", disabled=True, width="small")
             },

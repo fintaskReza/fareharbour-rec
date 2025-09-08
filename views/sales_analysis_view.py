@@ -245,17 +245,20 @@ def create_sales_pivot_analysis(df):
 def create_tour_pivot_table(df):
     """Create pivot table summarizing data by tour with fee splits from database"""
     try:
+        # Separate affiliate and direct bookings for pivot table (exclude affiliates)
+        affiliate_bookings = df[df['Affiliate'].notna() & (df['Affiliate'] != '')].copy()
+        direct_bookings = df[~(df['Affiliate'].notna() & (df['Affiliate'] != ''))].copy()
+
         # Define the columns we want to aggregate
         pivot_columns = {
             'Item': 'Tour Name',
             '# of Pax': 'Total Guests',
-            'Total Paid': 'Total Revenue',
+            'Subtotal Paid': 'Subtotal Paid',  # Ex-VAT revenue amount
+            'Tax Paid': 'Tax Paid',  # VAT amount
             'Payment Gross': 'Gross Payments',
             'Refund Gross': 'Total Refunds',
-            'Net Revenue Collected': 'Net Revenue',
             'Receivable from Affiliate': 'Receivable from Affiliate',
-            'Received from Affiliate': 'Received from Affiliate',
-            'Subtotal': 'Subtotal (Ex-Tax)'
+            'Received from Affiliate': 'Received from Affiliate'
         }
 
         # Check which columns exist in the dataframe
@@ -265,7 +268,7 @@ def create_tour_pivot_table(df):
             st.error("❌ 'Item' column not found in CSV. Cannot create pivot table.")
             return pd.DataFrame()
 
-        # Group by Item and aggregate
+        # Group by Item and aggregate - ONLY DIRECT BOOKINGS
         agg_dict = {}
         for col, label in available_columns.items():
             if col == 'Item':
@@ -275,16 +278,27 @@ def create_tour_pivot_table(df):
             else:
                 agg_dict[col] = 'sum'  # Sum financial amounts
 
+        # Ensure Total Tax is numeric before aggregation
+        if 'Total Tax' in df.columns:
+            # Handle both string values with $ signs and already numeric values
+            if df['Total Tax'].dtype == 'object':
+                df['Total Tax'] = pd.to_numeric(df['Total Tax'].str.replace('$', '').str.replace(',', ''), errors='coerce').fillna(0)
+            else:
+                df['Total Tax'] = pd.to_numeric(df['Total Tax'], errors='coerce').fillna(0)
+
+
         if not agg_dict:
             st.error("❌ No numeric columns found for aggregation.")
             return pd.DataFrame()
 
-        # Create the pivot table
-        pivot_df = df.groupby('Item').agg(agg_dict).reset_index()
+        # Create the pivot table - ONLY DIRECT BOOKINGS (exclude affiliate bookings)
+        pivot_df = direct_bookings.groupby('Item').agg(agg_dict).reset_index()
+
 
         # Rename columns for better display
         column_mapping = {col: available_columns[col] for col in pivot_df.columns if col in available_columns}
         pivot_df.rename(columns=column_mapping, inplace=True)
+
 
         # Add booking count
         booking_counts = df.groupby('Item').size().reset_index(name='Booking Count')
@@ -448,30 +462,135 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df):
         entry_number = 1
         total_vat_amount = 0
 
-        # Calculate total VAT across all tours
-        for _, row in pivot_df.iterrows():
-            tour_name = row['Tour Name']
-            subtotal_ex_tax = pd.to_numeric(row.get('Subtotal (Ex-Tax)', 0), errors='coerce')
-            total_revenue = pd.to_numeric(row.get('Total Revenue', 0), errors='coerce')
+        # Separate affiliate and direct bookings from raw_df
+        affiliate_bookings = raw_df[raw_df['Affiliate'].notna() & (raw_df['Affiliate'] != '')].copy()
+        direct_bookings = raw_df[~(raw_df['Affiliate'].notna() & (raw_df['Affiliate'] != ''))].copy()
 
-            # Calculate VAT amount (difference between total and ex-tax)
-            vat_amount = total_revenue - subtotal_ex_tax if total_revenue > subtotal_ex_tax else 0
-            if vat_amount > 0:
-                total_vat_amount += vat_amount
+        # Separate payments and refunds
+        payments_df = raw_df[raw_df['Payment or Refund'] == 'Payment'].copy()
+        refunds_df = raw_df[raw_df['Payment or Refund'] == 'Refund'].copy()
 
-        # Calculate total payments by payment type across all transactions
+        # Calculate total VAT from direct bookings only (payments only, not refunds)
+        payments_only_df = direct_bookings[direct_bookings['Payment or Refund'] == 'Payment']
+        if not payments_only_df.empty and 'Tax Paid' in payments_only_df.columns:
+            total_vat_amount = pd.to_numeric(payments_only_df['Tax Paid'], errors='coerce').fillna(0).sum()
+            st.write(f"DEBUG: VAT calculation from Tax Paid column")
+            st.write(f"DEBUG: Payments only rows: {len(payments_only_df)}")
+            st.write(f"DEBUG: Total VAT amount: {total_vat_amount}")
+        else:
+            total_vat_amount = 0
+            st.write("DEBUG: No Tax Paid column found or no payment rows")
+
+        # Calculate affiliate commissions and payables/receivables
+        affiliate_commissions = {}
+        affiliate_payables = {}
+        affiliate_receivables = {}
+
+        if not affiliate_bookings.empty:
+            for _, row in affiliate_bookings.iterrows():
+                affiliate_name = row.get('Affiliate', 'Unknown Affiliate')
+                total_paid = pd.to_numeric(row.get('Total Paid', 0), errors='coerce')
+                payable_to_affiliate = pd.to_numeric(row.get('Payable to Affiliate', 0), errors='coerce')
+                paid_to_affiliate = pd.to_numeric(row.get('Paid to Affiliate', 0), errors='coerce')
+                receivable_from_affiliate = pd.to_numeric(row.get('Receivable from Affiliate', 0), errors='coerce')
+                received_from_affiliate = pd.to_numeric(row.get('Received from Affiliate', 0), errors='coerce')
+
+                commission_expense = 0
+
+                # Scenario 1: Affiliate collects payment (we have receivable from them)
+                if receivable_from_affiliate > 0 or received_from_affiliate > 0:
+                    # Commission = Total Paid - Affiliate Collection
+                    affiliate_collection = receivable_from_affiliate + received_from_affiliate
+                    commission_expense = total_paid - affiliate_collection
+
+                    # Track receivables (affiliate collected payment, owes us the difference)
+                    if affiliate_name in affiliate_receivables:
+                        affiliate_receivables[affiliate_name] += affiliate_collection
+                    else:
+                        affiliate_receivables[affiliate_name] = affiliate_collection
+
+                # Scenario 2: We collect payment (we pay commission to affiliate)
+                elif payable_to_affiliate > 0 or paid_to_affiliate > 0:
+                    commission_expense = payable_to_affiliate + paid_to_affiliate
+
+                    # Track payables (we collected payment, owe commission to affiliate)
+                    affiliate_payment = payable_to_affiliate + paid_to_affiliate
+                    if affiliate_name in affiliate_payables:
+                        affiliate_payables[affiliate_name] += affiliate_payment
+                    else:
+                        affiliate_payables[affiliate_name] = affiliate_payment
+
+                # Track commission expense by affiliate
+                if commission_expense > 0:
+                    if affiliate_name in affiliate_commissions:
+                        affiliate_commissions[affiliate_name] += commission_expense
+                    else:
+                        affiliate_commissions[affiliate_name] = commission_expense
+
+        # Note: Refunds are already accounted for in Net Revenue Collected
+        # No separate refund processing needed
+
+        # Calculate total payments by payment type from ALL bookings
+        # Use Subtotal Paid + Tax Paid (don't subtract tour fees)
         total_payments_by_type = {}
+
+        # Process DIRECT bookings payments
         for _, row in pivot_df.iterrows():
             tour_name = row['Tour Name']
-            tour_transactions = raw_df[raw_df['Item'] == tour_name].copy()
+            # Only use direct booking transactions for payments
+            tour_transactions = direct_bookings[direct_bookings['Item'] == tour_name].copy()
 
             if not tour_transactions.empty:
-                tour_payment_breakdown = calculate_payment_breakdown(tour_transactions)
+                # Calculate payment breakdown using Subtotal Paid + Tax Paid
+                tour_payment_breakdown = {}
+                for _, transaction in tour_transactions.iterrows():
+                    payment_type = transaction.get('Payment Type', 'Unknown')
+                    subtotal_paid = pd.to_numeric(transaction.get('Subtotal Paid', 0), errors='coerce')
+                    tax_paid = pd.to_numeric(transaction.get('Tax Paid', 0), errors='coerce')
+                    total_payment = subtotal_paid + tax_paid
+
+                    if payment_type in tour_payment_breakdown:
+                        tour_payment_breakdown[payment_type] += total_payment
+                    else:
+                        tour_payment_breakdown[payment_type] = total_payment
+
+                # Add to overall totals
                 for payment_type, amount in tour_payment_breakdown.items():
                     if payment_type in total_payments_by_type:
                         total_payments_by_type[payment_type] += amount
                     else:
                         total_payments_by_type[payment_type] = amount
+
+        # Process AFFILIATE bookings payments as separate payment types
+        affiliate_payments_by_type = {}
+        if not affiliate_bookings.empty:
+            for _, row in affiliate_bookings.iterrows():
+                affiliate_name = row.get('Affiliate', 'Unknown Affiliate')
+                payment_type = row.get('Payment Type', 'Unknown')
+
+                # For affiliate payments, capture both Received and Receivable amounts
+                received_from_affiliate = pd.to_numeric(row.get('Received from Affiliate', 0), errors='coerce')
+                receivable_from_affiliate = pd.to_numeric(row.get('Receivable from Affiliate', 0), errors='coerce')
+                paid_to_affiliate = pd.to_numeric(row.get('Paid to Affiliate', 0), errors='coerce')
+                payable_to_affiliate = pd.to_numeric(row.get('Payable to Affiliate', 0), errors='coerce')
+
+                # Total affiliate payment received/collected
+                total_affiliate_payment = received_from_affiliate + receivable_from_affiliate
+
+                # If there are payments received from affiliate, create affiliate payment type
+                if total_affiliate_payment > 0:
+                    affiliate_payment_type = f'Affiliate Payment - {affiliate_name}'
+                    if affiliate_payment_type in affiliate_payments_by_type:
+                        affiliate_payments_by_type[affiliate_payment_type] += total_affiliate_payment
+                    else:
+                        affiliate_payments_by_type[affiliate_payment_type] = total_affiliate_payment
+
+            # Add affiliate payments to total payments
+            for affiliate_payment_type, payment_amount in affiliate_payments_by_type.items():
+                if affiliate_payment_type in total_payments_by_type:
+                    total_payments_by_type[affiliate_payment_type] += payment_amount
+                else:
+                    total_payments_by_type[affiliate_payment_type] = payment_amount
 
         # Create ONE consolidated journal entry
         je_number = f'JE{entry_number:04d}'
@@ -496,50 +615,132 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df):
                             total_fees_by_type[fee_name] = fee_amount
 
         # REVENUE SIDE (Credits) - All revenue types in one entry
+
+        # 1. Direct Tour Revenue Credits (ex-VAT from Subtotal Paid, excluding affiliate bookings)
         for _, row in pivot_df.iterrows():
             tour_name = row['Tour Name']
-            tour_revenue = pd.to_numeric(row.get('Tour Revenue (Net of Fees)', 0), errors='coerce')
+            subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
 
-            # 1. Tour Revenue Credit
+            # Get fee split for this tour
+            total_guests = pd.to_numeric(row.get('Total Guests', 0), errors='coerce')
+            tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour_name] if not fee_mappings_df.empty else pd.DataFrame()
+            total_fee_amount = 0
+
+            if not tour_fees.empty:
+                for _, fee_row in tour_fees.iterrows():
+                    fee_amount = fee_row['per_person_amount'] * total_guests
+                    total_fee_amount += fee_amount
+
+            # Tour revenue = Subtotal Paid - Tour Fees
+            tour_revenue = subtotal_paid - total_fee_amount
+
+            # 1. Direct Tour Revenue Credit (ex-VAT)
             if tour_revenue > 0:
-                tour_revenue_account = qb_mappings['tour_revenue'].get(tour_name, {}).get('account', f'Tour Revenue - {tour_name}')
+                tour_revenue_account = qb_mappings["tour_revenue"].get(tour_name, {}).get("account", f"Tour Revenue - {tour_name}")
                 journal_entries.append({
                     'Entry Number': je_number,
-                    'Date': entry_date,
+                                'Date': entry_date,
                     'Account': tour_revenue_account,
                     'Description': f'{tour_name} revenue',
-                    'Debit': '',
+                                'Debit': '',
                     'Credit': f'{tour_revenue:.2f}',
-                    'Memo': f'Tour revenue for {tour_name}'
+                    'Memo': f'Direct tour revenue for {tour_name} (ex-VAT)'
                 })
 
-        # 2. Fee Revenue Credits (summed by fee type across all tours)
+        # 2. Affiliate Booking Revenue Credits (ex-VAT)
+        affiliate_revenue_by_tour = {}
+        if not affiliate_bookings.empty:
+            for _, row in affiliate_bookings.iterrows():
+                tour_name = row.get('Item', 'Unknown Tour')
+                subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
+
+                if subtotal_paid > 0:
+                    if tour_name in affiliate_revenue_by_tour:
+                        affiliate_revenue_by_tour[tour_name] += subtotal_paid
+                    else:
+                        affiliate_revenue_by_tour[tour_name] = subtotal_paid
+
+            # Create revenue entries for affiliate bookings
+            for tour_name, revenue_amount in affiliate_revenue_by_tour.items():
+                if revenue_amount > 0:
+                    tour_revenue_account = qb_mappings['tour_revenue'].get(tour_name, {}).get('account', f'Tour Revenue - {tour_name}')
+                    journal_entries.append({
+                        'Entry Number': je_number,
+                        'Date': entry_date,
+                        'Account': tour_revenue_account,
+                        'Description': f'{tour_name} affiliate revenue',
+                        'Debit': '',
+                        'Credit': f'{revenue_amount:.2f}',
+                        'Memo': f'Affiliate booking revenue for {tour_name} (ex-VAT)'
+                    })
+
+        # 3. Fee Revenue Credits (ex-VAT, summed by fee type)
         for fee_name, total_fee_amount in total_fees_by_type.items():
             if total_fee_amount > 0:
                 fee_revenue_account = qb_mappings['fee_revenue'].get(fee_name, {}).get('account', f'Fee Revenue - {fee_name}')
                 journal_entries.append({
                     'Entry Number': je_number,
-                    'Date': entry_date,
+                                        'Date': entry_date,
                     'Account': fee_revenue_account,
                     'Description': f'{fee_name}',
-                    'Debit': '',
+                                        'Debit': '',
                     'Credit': f'{total_fee_amount:.2f}',
-                    'Memo': f'{fee_name} revenue (all tours)'
+                    'Memo': f'{fee_name} revenue (all tours, ex-VAT)'
                 })
 
-        # 3. VAT Credit
+        # 4. Affiliate Commission Expense (debits) and Payables/Receivables
+        for affiliate_name, commission_amount in affiliate_commissions.items():
+            if commission_amount > 0:
+                # Debit: Commission Expense
+                journal_entries.append({
+                    'Entry Number': je_number,
+                    'Date': entry_date,
+                    'Account': 'Affiliate Commission Expense',
+                    'Description': f'{affiliate_name} commission expense',
+                    'Debit': f'{commission_amount:.2f}',
+                    'Credit': '',
+                    'Memo': f'Commission expense to {affiliate_name}'
+                })
+
+                # Credit: Affiliate Payable or Debit: Affiliate Receivable
+                if affiliate_name in affiliate_payables and affiliate_payables[affiliate_name] > 0:
+                    # We owe commission to affiliate (we collected payment)
+                    journal_entries.append({
+                        'Entry Number': je_number,
+                        'Date': entry_date,
+                        'Account': f'Accounts Payable - {affiliate_name}',
+                        'Description': f'{affiliate_name} commission payable',
+                        'Debit': '',
+                        'Credit': f'{affiliate_payables[affiliate_name]:.2f}',
+                        'Memo': f'Commission payable to {affiliate_name}'
+                    })
+                elif affiliate_name in affiliate_receivables and affiliate_receivables[affiliate_name] > 0:
+                    # Affiliate owes us (they collected payment)
+                    journal_entries.append({
+                        'Entry Number': je_number,
+                        'Date': entry_date,
+                        'Account': f'Accounts Receivable - {affiliate_name}',
+                        'Description': f'{affiliate_name} commission receivable',
+                        'Debit': f'{affiliate_receivables[affiliate_name]:.2f}',
+                        'Credit': '',
+                        'Memo': f'Commission receivable from {affiliate_name}'
+                    })
+
+        # 5. VAT Credit (single summed amount from direct bookings)
         if total_vat_amount > 0:
-            journal_entries.append({
+                journal_entries.append({
                 'Entry Number': je_number,
-                'Date': entry_date,
+                    'Date': entry_date,
                 'Account': 'Sales VAT',
-                'Description': 'VAT on sales revenue',
-                'Debit': '',
+                'Description': 'VAT on direct sales',
+                    'Debit': '',
                 'Credit': f'{total_vat_amount:.2f}',
-                'Memo': 'VAT collected on sales'
+                'Memo': f'VAT collected on direct sales (${total_vat_amount:.2f})'
             })
 
         # PAYMENT SIDE (Debits) - All payments in one entry
+
+        # 1. Direct booking payments
         for payment_type, total_amount in total_payments_by_type.items():
             if total_amount > 0:
                 payment_account = qb_mappings['payment_type'].get(payment_type, {}).get('account', get_payment_account(payment_type))
@@ -551,10 +752,30 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df):
                     'Description': f'{payment_type} payment',
                     'Debit': f'{total_amount:.2f}',
                     'Credit': '',
-                    'Memo': f'Payment received via {payment_type}'
+                    'Memo': f'Direct booking payment via {payment_type}'
                 })
 
-        entry_number += 1
+        # 2. Affiliate payment receipts (from affiliate payments collected)
+        for affiliate_payment_type, payment_amount in affiliate_payments_by_type.items():
+            if payment_amount > 0:
+                # Extract affiliate name from payment type
+                if 'Affiliate Payment - ' in affiliate_payment_type:
+                    affiliate_name = affiliate_payment_type.replace('Affiliate Payment - ', '')
+
+                journal_entries.append({
+                    'Entry Number': je_number,
+                    'Date': entry_date,
+                    'Account': f'Accounts Receivable - {affiliate_name}',
+                    'Description': f'{affiliate_name} payment received',
+                    'Debit': f'{payment_amount:.2f}',
+                    'Credit': '',
+                    'Memo': f'Payment received from affiliate {affiliate_name}'
+                })
+
+        # Note: Refunds are already accounted for in Net Revenue Collected
+        # No separate refund entries needed
+
+                entry_number += 1
 
         # Convert to DataFrame
         if journal_entries:
@@ -699,7 +920,7 @@ def display_pivot_table(pivot_df):
         # Format currency columns
         currency_columns = ['Total Revenue', 'Gross Payments', 'Total Refunds', 'Net Revenue',
                            'Receivable from Affiliate', 'Received from Affiliate', 'Net After Refunds', 'Revenue per Guest',
-                           'Subtotal (Ex-Tax)', 'Total Fees per Person', 'Total Fee Revenue', 'Tour Revenue (Net of Fees)']
+                           'Subtotal (Ex-Tax)', 'Total Fees per Person', 'Total Fee Revenue', 'Tour Revenue (Net of Fees)', 'Total Tax']
 
         for col in currency_columns:
             if col in display_df.columns:
