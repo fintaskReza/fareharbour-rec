@@ -4,6 +4,272 @@ import pandas as pd
 from datetime import datetime
 from scripts.data_loaders import load_sales_csv_data
 from scripts.database import execute_query
+from scripts.journal_exports import (
+    create_enhanced_quickbooks_journal,
+    create_enhanced_quickbooks_journal_v2,
+    create_v2_detailed_records,
+    create_tour_pivot_table,
+    get_quickbooks_mappings
+)
+
+def generate_v1_export(pivot_data, filtered_df, include_processing_fees=False):
+    """Generate V1 export with all bookings included"""
+    st.markdown("---")
+    st.subheader("📊 V1 Export Results (All Bookings)")
+
+    # Show mapping status
+    qb_mappings = get_quickbooks_mappings()
+    tours_mapped = len(qb_mappings['tour_revenue'])
+    fees_mapped = len(qb_mappings['fee_revenue'])
+    payments_mapped = len(qb_mappings['payment_type'])
+
+    with st.expander("🔗 QuickBooks Mapping Status", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Tour Mappings", tours_mapped)
+        with col2:
+            st.metric("Fee Mappings", fees_mapped)
+        with col3:
+            st.metric("Payment Mappings", payments_mapped)
+
+        if tours_mapped == 0 or payments_mapped == 0:
+            st.warning("⚠️ Some mappings are missing. Journal entries may use fallback account names.")
+
+    # Generate V1 journal
+    journal_df, _, _ = create_enhanced_quickbooks_journal(pivot_data, filtered_df, include_processing_fees)
+
+    if not journal_df.empty:
+        # Show summary
+        unique_entries = journal_df['Entry Number'].nunique()
+        total_line_items = len(journal_df)
+        total_credits = pd.to_numeric(journal_df['Credit'].replace('', '0'), errors='coerce').sum()
+        total_debits = pd.to_numeric(journal_df['Debit'].replace('', '0'), errors='coerce').sum()
+
+        st.success(f"✅ V1 Journal Generated: {unique_entries} consolidated entry with {total_line_items} line items")
+        
+        # Calculate balance
+        v1_balance = total_debits - total_credits
+        balance_status = "⚖️ Balanced" if abs(v1_balance) < 0.01 else f"⚠️ Imbalance: ${v1_balance:.2f}"
+        
+        st.info(f"💰 V1 Totals: Credits: ${total_credits:,.2f} | Debits: ${total_debits:,.2f} | {balance_status}")
+        
+        # Show rounding adjustment if present
+        rounding_entries = journal_df[journal_df['Account'] == 'Rounding Difference']
+        if not rounding_entries.empty:
+            rounding_amount = rounding_entries.iloc[0]['Credit'] if rounding_entries.iloc[0]['Credit'] else rounding_entries.iloc[0]['Debit']
+            st.info(f"🔄 Rounding adjustment applied: ${rounding_amount}")
+
+        # V1 Export buttons
+        st.markdown("### 📥 V1 Export Downloads")
+        v1_col1, v1_col2, v1_col3 = st.columns(3)
+
+        # Store in session state
+        st.session_state.v1_pivot_csv = pivot_data.to_csv(index=False)
+        st.session_state.v1_filtered_csv = filtered_df.to_csv(index=False)
+        st.session_state.v1_journal_csv = journal_df.to_csv(index=False)
+
+        with v1_col1:
+            st.download_button(
+                label="📊 Download V1 Pivot Table",
+                data=st.session_state.v1_pivot_csv,
+                file_name=f"sales_pivot_table_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime='text/csv',
+                help="Download V1 pivot table (all bookings)"
+            )
+
+        with v1_col2:
+            st.download_button(
+                label="📋 Download V1 Filtered Data",
+                data=st.session_state.v1_filtered_csv,
+                file_name=f"sales_filtered_data_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime='text/csv',
+                help="Download V1 filtered raw data"
+            )
+
+        with v1_col3:
+            st.download_button(
+                label="📚 Download V1 Journal",
+                data=st.session_state.v1_journal_csv,
+                file_name=f"quickbooks_journal_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime='text/csv',
+                help="Download V1 QuickBooks journal entries"
+            )
+
+        # Show preview
+        with st.expander("🔍 Preview V1 Journal Entries"):
+            st.dataframe(journal_df, use_container_width=True)
+    else:
+        st.warning("⚠️ No V1 journal entries generated.")
+
+
+def generate_v2_export(df, pivot_data, include_processing_fees=False):
+    """Generate V2 export excluding affiliate bookings where payment already received"""
+    st.markdown("---")
+    st.subheader("🎯 V2 Export Results (Filtered Bookings)")
+
+    # Filter out bookings where affiliate payment already received
+    v2_raw_df = df.copy()
+    v2_raw_df['Receivable from Affiliate'] = pd.to_numeric(v2_raw_df.get('Receivable from Affiliate', 0), errors='coerce').fillna(0)
+    v2_raw_df['Received from Affiliate'] = pd.to_numeric(v2_raw_df.get('Received from Affiliate', 0), errors='coerce').fillna(0)
+
+    # Remove bookings where affiliate payment already received
+    v2_filtered_df = v2_raw_df[
+        ~((v2_raw_df['Receivable from Affiliate'] > 0) | (v2_raw_df['Received from Affiliate'] > 0))
+    ].copy()
+
+    if not v2_filtered_df.empty:
+        # Recalculate pivot table for V2
+        v2_pivot_df = create_tour_pivot_table(v2_filtered_df)
+
+        if not v2_pivot_df.empty:
+            st.info(f"📊 V2 Export: {len(v2_filtered_df)} bookings included (excluded {len(df) - len(v2_filtered_df)} affiliate bookings with received payments)")
+
+            # Generate V2 journal and detailed records
+            v2_journal_df, total_vat_payments, total_vat_refunds = create_enhanced_quickbooks_journal_v2(v2_pivot_df, v2_filtered_df, include_processing_fees)
+
+            if not v2_journal_df.empty:
+                # Show V2 journal summary
+                v2_unique_entries = v2_journal_df['Entry Number'].nunique()
+                v2_total_line_items = len(v2_journal_df)
+                v2_total_credits = pd.to_numeric(v2_journal_df['Credit'].replace('', '0'), errors='coerce').sum()
+                v2_total_debits = pd.to_numeric(v2_journal_df['Debit'].replace('', '0'), errors='coerce').sum()
+
+                st.success(f"✅ V2 Journal Generated: {v2_unique_entries} consolidated entry with {v2_total_line_items} line items")
+                
+                # Calculate balance
+                v2_balance = v2_total_debits - v2_total_credits
+                balance_status = "⚖️ Balanced" if abs(v2_balance) < 0.01 else f"⚠️ Imbalance: ${v2_balance:.2f}"
+                
+                st.info(f"💰 V2 Totals: Credits: ${v2_total_credits:,.2f} | Debits: ${v2_total_debits:,.2f} | {balance_status}")
+                
+                # Show rounding adjustment if present
+                rounding_entries = v2_journal_df[v2_journal_df['Account'] == 'Rounding Difference']
+                if not rounding_entries.empty:
+                    rounding_amount = rounding_entries.iloc[0]['Credit'] if rounding_entries.iloc[0]['Credit'] else rounding_entries.iloc[0]['Debit']
+                    st.info(f"🔄 Rounding adjustment applied: ${rounding_amount}")
+
+                # Show VAT breakdown summary
+                if total_vat_payments > 0 or total_vat_refunds > 0:
+                    st.markdown("**VAT Breakdown:**")
+                    vat_col1, vat_col2, vat_col3 = st.columns(3)
+                    with vat_col1:
+                        st.metric("VAT on Payments", f"${total_vat_payments:,.2f}")
+                    with vat_col2:
+                        st.metric("VAT on Refunds", f"${total_vat_refunds:,.2f}")
+                    with vat_col3:
+                        st.metric("Net VAT", f"${total_vat_payments - total_vat_refunds:,.2f}")
+
+                # Generate detailed records
+                v2_detailed_records = create_v2_detailed_records(v2_filtered_df)
+
+                # Store CSV data in session state
+                st.session_state.v2_pivot_csv = v2_pivot_df.to_csv(index=False)
+                st.session_state.v2_filtered_csv = v2_filtered_df.to_csv(index=False)
+                st.session_state.v2_journal_csv = v2_journal_df.to_csv(index=False)
+                st.session_state.v2_detailed_csv = v2_detailed_records.to_csv(index=False)
+
+                # Create tabs for exports and previews
+                export_tab, downloads_tab = st.tabs(["📚 Journal Export", "📥 Additional Downloads"])
+                
+                with export_tab:
+                    # Main journal export - full width
+                    st.markdown("### 📚 V2 QuickBooks Journal Export")
+                    
+                    # Primary journal download button - full width
+                    st.download_button(
+                        label="📚 Download V2 Journal + Details",
+                        data=st.session_state.v2_journal_csv,
+                        file_name=f"quickbooks_journal_v2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime='text/csv',
+                        help="Download V2 QuickBooks journal entries with detailed records",
+                        use_container_width=True
+                    )
+                    
+                    # Journal preview - full width with column summations
+                    st.markdown("#### 🔍 Journal Preview")
+                    
+                    # Calculate column summations
+                    total_credits = pd.to_numeric(v2_journal_df['Credit'].replace('', '0'), errors='coerce').sum()
+                    total_debits = pd.to_numeric(v2_journal_df['Debit'].replace('', '0'), errors='coerce').sum()
+                    
+                    # Display the journal with full width
+                    st.dataframe(v2_journal_df, use_container_width=True, height=400)
+                    
+                    # Show column summations at bottom
+                    sum_col1, sum_col2, sum_col3 = st.columns(3)
+                    with sum_col1:
+                        st.metric("Total Credits", f"${total_credits:,.2f}")
+                    with sum_col2:
+                        st.metric("Total Debits", f"${total_debits:,.2f}")
+                    with sum_col3:
+                        balance = total_credits - total_debits
+                        st.metric("Balance", f"${balance:,.2f}", delta=f"{'Balanced' if abs(balance) < 0.01 else 'Unbalanced'}")
+
+                with downloads_tab:
+                    st.markdown("### 📥 Additional V2 Downloads")
+                    
+                    # Other downloads in columns
+                    dl_col1, dl_col2, dl_col3 = st.columns(3)
+                    
+                    with dl_col1:
+                        st.download_button(
+                            label="📊 Download V2 Pivot Table",
+                            data=st.session_state.v2_pivot_csv,
+                            file_name=f"sales_pivot_table_v2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime='text/csv',
+                            help="Download V2 pivot table (excludes affiliate payments received)",
+                            use_container_width=True
+                        )
+
+                    with dl_col2:
+                        st.download_button(
+                            label="📋 Download V2 Filtered Data",
+                            data=st.session_state.v2_filtered_csv,
+                            file_name=f"sales_filtered_data_v2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime='text/csv',
+                            help="Download V2 filtered raw data",
+                            use_container_width=True
+                        )
+
+                    with dl_col3:
+                        st.download_button(
+                            label="📑 Download V2 Detailed Records",
+                            data=st.session_state.v2_detailed_csv,
+                            file_name=f"v2_detailed_records_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime='text/csv',
+                            help="Download detailed records with fee breakdown and net amounts",
+                            use_container_width=True
+                        )
+                    
+                    # Preview for detailed records
+                    with st.expander("📋 Preview V2 Detailed Records"):
+                        preview_df = v2_detailed_records.head(10).copy()
+                        if len(v2_detailed_records) > 10:
+                            st.info(f"Showing first 10 of {len(v2_detailed_records)} records")
+                        st.dataframe(preview_df, use_container_width=True)
+
+                st.info("ℹ️ **V2 Export Logic**: Excludes any bookings where 'Receivable from Affiliate' > 0 OR 'Received from Affiliate' > 0, keeping only bookings where affiliate payments are still outstanding or no affiliate involvement.")
+
+                st.markdown("""
+                **📑 V2 Detailed Records includes:**
+                - All booking records used in V2 journal calculations
+                - Key financial fields: Subtotal Paid, Tax Paid, Total Paid
+                - **Individual fee breakdown columns** (e.g., "Booking Fee Amount", "Service Fee Amount")
+                - **Total Fees** (sum of all fees for the booking)
+                - **Subtotal Paid (Ex. Other Fees)** (Subtotal Paid minus Total Fees)
+                - **VAT Split**: VAT_Payments, VAT_Refunds (separate columns based on Payment or Refund)
+                - **Transaction Type** classification (Revenue/Refund) based on Payment or Refund
+                - Payment types and affiliate information
+                - Calculated field: Total Amount (Subtotal + Tax)
+                - V2 filter status indicator
+                """)
+            else:
+                st.warning("⚠️ No V2 journal entries generated.")
+        else:
+            st.warning("⚠️ No V2 pivot table data available.")
+    else:
+        st.warning("⚠️ All bookings were excluded by V2 filter (all had affiliate payments already received).")
+
 
 def sales_report_analysis():
     """Sales Report Analysis Page with CSV Upload and Pivot Tables"""
@@ -16,80 +282,131 @@ def sales_report_analysis():
     </style>
     """, unsafe_allow_html=True)
 
+    # Initialize session state for downloads
+    if 'v1_pivot_csv' not in st.session_state:
+        st.session_state.v1_pivot_csv = None
+    if 'v1_filtered_csv' not in st.session_state:
+        st.session_state.v1_filtered_csv = None
+    if 'v1_journal_csv' not in st.session_state:
+        st.session_state.v1_journal_csv = None
+    if 'v2_pivot_csv' not in st.session_state:
+        st.session_state.v2_pivot_csv = None
+    if 'v2_filtered_csv' not in st.session_state:
+        st.session_state.v2_filtered_csv = None
+    if 'v2_journal_csv' not in st.session_state:
+        st.session_state.v2_journal_csv = None
+    if 'v2_detailed_csv' not in st.session_state:
+        st.session_state.v2_detailed_csv = None
+
     # File upload section
     st.sidebar.header("📁 Sales Report Upload")
 
+    # Default CSV file for local development
+    default_csv_path = "/Users/reza/Documents/GitHub/Fareharbour/Custom-sales-report--2025-07-25--2025-08-23.csv"
+    default_file_loaded = False
+
+    # Check if default file exists and load it automatically
+    import os
+    import io
+    if os.path.exists(default_csv_path):
+        try:
+            with open(default_csv_path, 'rb') as f:
+                default_csv_content = f.read()
+
+            # Convert bytes to file-like object for pandas
+            csv_file_like = io.BytesIO(default_csv_content)
+
+            # Load the default CSV
+            with st.spinner("Loading default sales report for development..."):
+                df = load_sales_csv_data(csv_file_like)
+                default_file_loaded = True
+
+            st.sidebar.success("✅ Default CSV loaded for development")
+            st.sidebar.info("💡 Upload a different file above to override")
+
+        except Exception as e:
+            st.sidebar.warning(f"⚠️ Could not load default CSV: {str(e)}")
+            df = None
+    else:
+        df = None
+
+    # File uploader for manual upload (overrides default)
     sales_csv_file = st.sidebar.file_uploader(
-        "Upload Sales Report CSV",
+        "Upload Sales Report CSV (overrides default)",
         type=['csv'],
         help="Upload the FareHarbour sales report CSV file"
     )
 
+    # Use uploaded file if provided, otherwise use default
     if sales_csv_file is not None:
         try:
-            # Load CSV with proper header handling (skip first row, use second row as headers)
-            with st.spinner("Loading and processing sales report..."):
-                # Read CSV and handle headers properly
+            with st.spinner("Loading and processing uploaded sales report..."):
                 df = load_sales_csv_data(sales_csv_file)
+                default_file_loaded = False
+        except Exception as e:
+            st.error(f"❌ Error loading uploaded file: {str(e)}")
+            return
 
-            if df is not None and not df.empty:
-                # Display data overview
-                st.markdown('<div class="metrics-container">', unsafe_allow_html=True)
-                st.subheader("📈 Data Overview")
+    # Process the data if we have it
+    if df is not None and not df.empty:
+        try:
+            # Display data overview
+            st.markdown('<div class="metrics-container">', unsafe_allow_html=True)
+            st.subheader("📈 Data Overview")
 
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Records", len(df))
-                with col2:
-                    unique_tours = df['Item'].nunique() if 'Item' in df.columns else 0
-                    st.metric("Unique Tours", unique_tours)
-                with col3:
-                    total_pax = df['# of Pax'].sum() if '# of Pax' in df.columns else 0
-                    st.metric("Total Guests", f"{total_pax:,}")
-                with col4:
-                    total_revenue = df['Total Paid'].sum() if 'Total Paid' in df.columns else 0
-                    st.metric("Total Revenue", f"${total_revenue:,.2f}")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Records", len(df))
+            with col2:
+                unique_tours = df['Item'].nunique() if 'Item' in df.columns else 0
+                st.metric("Unique Tours", unique_tours)
+            with col3:
+                total_pax = df['# of Pax'].sum() if '# of Pax' in df.columns else 0
+                st.metric("Total Guests", f"{total_pax:,}")
+            with col4:
+                total_revenue = df['Total Paid'].sum() if 'Total Paid' in df.columns else 0
+                st.metric("Total Revenue", f"${total_revenue:,.2f}")
 
-                st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
-                # Create tabs for different analyses
-                tab1, tab2 = st.tabs(["📊 Pivot Analysis", "📈 Payment & Affiliate Breakdown"])
+            # Create tabs for different analyses
+            tab1, tab2 = st.tabs(["📊 Pivot Analysis", "📈 Payment & Affiliate Breakdown"])
 
-                with tab1:
-                    # Create pivot table and filters
-                    create_sales_pivot_analysis(df)
+            with tab1:
+                # Create pivot table and filters
+                create_sales_pivot_analysis(df)
 
-                with tab2:
-                    # Create detailed breakdown analysis
-                    create_payment_affiliate_breakdown(df)
-
-            else:
-                st.error("❌ Failed to load CSV data. Please check the file format.")
+            with tab2:
+                # Create detailed breakdown analysis
+                create_payment_affiliate_breakdown(df)
 
         except Exception as e:
             st.error(f"❌ Error processing file: {str(e)}")
             st.info("💡 Make sure the CSV has the correct format with headers starting on the second row.")
-
     else:
         # Instructions for file format
-        st.info("👆 Upload a FareHarbour Sales Report CSV file to begin analysis")
+        if not default_file_loaded:
+            st.error("❌ Failed to load CSV data. Please check the file format.")
+            st.info("👆 Upload a FareHarbour Sales Report CSV file to begin analysis")
 
-        st.markdown("""
-        ### 📋 Expected CSV Format
+            st.markdown("""
+            ### 📋 Expected CSV Format
 
-        The CSV file should have:
-        - **Row 1**: May contain metadata (will be skipped)
-        - **Row 2**: Column headers including Item, # of Pax, payments, refunds, etc.
-        - **Row 3+**: Actual data records
+            The CSV file should have:
+            - **Row 1**: May contain metadata (will be skipped)
+            - **Row 2**: Column headers including Item, # of Pax, payments, refunds, etc.
+            - **Row 3+**: Actual data records
 
-        **Key columns for analysis:**
-        - `Item`: Tour/activity name
-        - `# of Pax`: Number of guests
-        - `Total Paid`: Total amount paid
-        - `Refund Gross`: Refund amounts
-        - `Payment Gross`: Payment amounts
-        - `Receivable from Affiliate`: Affiliate amounts
-        """)
+            **Key columns for analysis:**
+            - `Item`: Tour/activity name
+            - `# of Pax`: Number of guests
+            - `Total Paid`: Total amount paid
+            - `Refund Gross`: Refund amounts
+            - `Payment Gross`: Payment amounts
+            - `Receivable from Affiliate`: Affiliate amounts
+            """)
+        else:
+            st.info("📊 Default CSV loaded successfully! You can now analyze the data or upload a different file to override.")
 
 def create_sales_pivot_analysis(df):
     """Create pivot table analysis with filtering"""
@@ -167,163 +484,37 @@ def create_sales_pivot_analysis(df):
 
         if not pivot_data.empty:
             # Format the pivot table for display
-            display_pivot_table(pivot_data)
+            display_payment_refund_pivot_table(filtered_df)
 
             # Export functionality
-            st.subheader("📥 Export Data")
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                if st.button("📊 Export Pivot Table", help="Download pivot table as CSV"):
-                    csv = pivot_data.to_csv(index=False)
-                    st.download_button(
-                        label="💾 Download CSV",
-                        data=csv,
-                        file_name=f"sales_pivot_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime='text/csv'
-                    )
-
-            with col2:
-                if st.button("📋 Export Filtered Data", help="Download filtered raw data as CSV"):
-                    csv = filtered_df.to_csv(index=False)
-                    st.download_button(
-                        label="💾 Download Raw Data CSV",
-                        data=csv,
-                        file_name=f"sales_filtered_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime='text/csv'
-                    )
-
-            with col3:
-                if st.button("📚 Export QB Journal", help="Generate QuickBooks journal entries with proper account mappings"):
-                    # Show mapping status before generating
-                    qb_mappings = get_quickbooks_mappings()
-                    tours_mapped = len(qb_mappings['tour_revenue'])
-                    fees_mapped = len(qb_mappings['fee_revenue'])
-                    payments_mapped = len(qb_mappings['payment_type'])
-
-                    with st.expander("🔗 Mapping Status", expanded=True):
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Tour Mappings", tours_mapped)
-                        with col2:
-                            st.metric("Fee Mappings", fees_mapped)
-                        with col3:
-                            st.metric("Payment Mappings", payments_mapped)
-
-                        if tours_mapped == 0 or payments_mapped == 0:
-                            st.warning("⚠️ Some mappings are missing. Journal entries may use fallback account names.")
-
-                    journal_df = create_enhanced_quickbooks_journal(pivot_data, filtered_df)
-                    if not journal_df.empty:
-                        # Show journal summary
-                        unique_entries = journal_df['Entry Number'].nunique()
-                        total_line_items = len(journal_df)
-                        total_credits = pd.to_numeric(journal_df['Credit'].replace('', '0'), errors='coerce').sum()
-                        total_debits = pd.to_numeric(journal_df['Debit'].replace('', '0'), errors='coerce').sum()
-
-                        st.success(f"✅ Generated {unique_entries} consolidated journal entry with {total_line_items} line items")
-                        st.info(f"💰 Total Credits: ${total_credits:,.2f} | Total Debits: ${total_debits:,.2f}")
-
-                        csv = journal_df.to_csv(index=False)
-                        st.download_button(
-                            label="💾 Download Journal CSV",
-                            data=csv,
-                            file_name=f"quickbooks_journal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime='text/csv'
-                        )
-
-                        # Show preview of journal entries
-                        with st.expander("🔍 Preview Journal Entries"):
-                            st.dataframe(journal_df, use_container_width=True)
-                    else:
-                        st.warning("⚠️ No journal entries generated. Please check your QuickBooks mappings and data.")
+            st.markdown("### 🎯 Export Options")
+            include_processing_fees = st.checkbox(
+                "💳 Include Processing Fee Expenses", 
+                value=False,
+                help="Include platform processing fees (Stripe, PayPal, etc.) as separate expense lines in journal entries"
+            )
+            
+            if include_processing_fees:
+                st.info("ℹ️ **Processing Fees**: Payment fees (negative) create expense debits + reduce payment clearing. Refund fees (positive) create expense credits + increase payment clearing.")
+            
+            # Create tabs for V1 and V2 exports
+            v2_tab, v1_tab = st.tabs(["🎯 V2 Export (Recommended)", "📊 V1 Export (All Bookings)"])
+            
+            with v2_tab:
+                st.markdown("**V2 Export**: Excludes affiliate bookings where payment already received - recommended for most use cases")
+                if st.button("🎯 **Generate V2 Export** (Filtered Bookings)", type="primary", help="Export excluding affiliate bookings with received payments + detailed records", use_container_width=True):
+                    generate_v2_export(df, pivot_data, include_processing_fees)
+            
+            with v1_tab:
+                st.markdown("**V1 Export**: Includes ALL bookings - use only if you need complete data including affiliate payments already received")
+                if st.button("📊 **Generate V1 Export** (All Bookings)", type="secondary", help="Export including ALL bookings with full QuickBooks journal", use_container_width=True):
+                    generate_v1_export(pivot_data, filtered_df, include_processing_fees)
         else:
             st.warning("⚠️ No data available for pivot table creation.")
     else:
         st.warning("⚠️ No data matches the selected filters.")
 
-def create_tour_pivot_table(df):
-    """Create pivot table summarizing data by tour with fee splits from database"""
-    try:
-        # Separate affiliate and direct bookings for pivot table (exclude affiliates)
-        affiliate_bookings = df[df['Affiliate'].notna() & (df['Affiliate'] != '')].copy()
-        direct_bookings = df[~(df['Affiliate'].notna() & (df['Affiliate'] != ''))].copy()
-
-        # Define the columns we want to aggregate
-        pivot_columns = {
-            'Item': 'Tour Name',
-            '# of Pax': 'Total Guests',
-            'Subtotal Paid': 'Subtotal Paid',  # Ex-VAT revenue amount
-            'Tax Paid': 'Tax Paid',  # VAT amount
-            'Payment Gross': 'Gross Payments',
-            'Refund Gross': 'Total Refunds',
-            'Receivable from Affiliate': 'Receivable from Affiliate',
-            'Received from Affiliate': 'Received from Affiliate'
-        }
-
-        # Check which columns exist in the dataframe
-        available_columns = {k: v for k, v in pivot_columns.items() if k in df.columns}
-
-        if 'Item' not in available_columns:
-            st.error("❌ 'Item' column not found in CSV. Cannot create pivot table.")
-            return pd.DataFrame()
-
-        # Group by Item and aggregate - ONLY DIRECT BOOKINGS
-        agg_dict = {}
-        for col, label in available_columns.items():
-            if col == 'Item':
-                continue  # Skip the groupby column
-            elif col == '# of Pax':
-                agg_dict[col] = 'sum'  # Sum total guests
-            else:
-                agg_dict[col] = 'sum'  # Sum financial amounts
-
-        # Ensure Total Tax is numeric before aggregation
-        if 'Total Tax' in df.columns:
-            # Handle both string values with $ signs and already numeric values
-            if df['Total Tax'].dtype == 'object':
-                df['Total Tax'] = pd.to_numeric(df['Total Tax'].str.replace('$', '').str.replace(',', ''), errors='coerce').fillna(0)
-            else:
-                df['Total Tax'] = pd.to_numeric(df['Total Tax'], errors='coerce').fillna(0)
-
-
-        if not agg_dict:
-            st.error("❌ No numeric columns found for aggregation.")
-            return pd.DataFrame()
-
-        # Create the pivot table - ONLY DIRECT BOOKINGS (exclude affiliate bookings)
-        pivot_df = direct_bookings.groupby('Item').agg(agg_dict).reset_index()
-
-
-        # Rename columns for better display
-        column_mapping = {col: available_columns[col] for col in pivot_df.columns if col in available_columns}
-        pivot_df.rename(columns=column_mapping, inplace=True)
-
-
-        # Add booking count
-        booking_counts = df.groupby('Item').size().reset_index(name='Booking Count')
-        pivot_df = pivot_df.merge(booking_counts, left_on='Tour Name', right_on='Item', how='left').drop('Item', axis=1)
-
-        # Integrate with database to calculate fee splits
-        pivot_df = calculate_fee_splits(pivot_df)
-
-        # Add calculated fields
-        if 'Total Revenue' in pivot_df.columns and 'Total Refunds' in pivot_df.columns:
-            pivot_df['Net After Refunds'] = pivot_df['Total Revenue'] - pivot_df['Total Refunds']
-
-        # Calculate averages
-        if 'Total Revenue' in pivot_df.columns and 'Total Guests' in pivot_df.columns:
-            pivot_df['Revenue per Guest'] = pivot_df['Total Revenue'] / pivot_df['Total Guests'].replace(0, 1)
-
-        # Sort by total revenue descending
-        if 'Total Revenue' in pivot_df.columns:
-            pivot_df = pivot_df.sort_values('Total Revenue', ascending=False)
-
-        return pivot_df
-
-    except Exception as e:
-        st.error(f"❌ Error creating pivot table: {str(e)}")
-        return pd.DataFrame()
+# Removed duplicate create_tour_pivot_table function - using import from scripts.journal_exports
 
 def calculate_fee_splits(pivot_df):
     """Calculate tour revenue vs fee revenue splits using database mappings"""
@@ -389,39 +580,8 @@ def calculate_fee_splits(pivot_df):
         st.error(f"❌ Error calculating fee splits: {str(e)}")
         return pivot_df
 
-def get_quickbooks_mappings():
-    """Retrieve QuickBooks account mappings from database"""
-    try:
-        mappings = execute_query("""
-            SELECT mapping_type, fareharbour_item, quickbooks_account, account_type, quickbooks_account_id
-            FROM quickbooks_mappings
-            WHERE is_active = true
-            ORDER BY mapping_type, fareharbour_item
-        """)
-
-        if mappings:
-            mapping_dict = {
-                'tour_revenue': {},
-                'fee_revenue': {},
-                'payment_type': {}
-            }
-
-            for mapping in mappings:
-                mapping_type, fareharbour_item, quickbooks_account, account_type, quickbooks_account_id = mapping
-                mapping_dict[mapping_type][fareharbour_item] = {
-                    'account': quickbooks_account,
-                    'account_type': account_type,
-                    'account_id': quickbooks_account_id
-                }
-
-            return mapping_dict
-        else:
-            st.warning("⚠️ No QuickBooks mappings found in database. Using fallback mappings.")
-            return get_fallback_mappings()
-
-    except Exception as e:
-        st.error(f"❌ Error retrieving QuickBooks mappings: {str(e)}")
-        return get_fallback_mappings()
+# Removed duplicate function - using import from scripts.journal_exports  
+# Removed duplicate get_quickbooks_mappings function - using import from scripts.journal_exports
 
 def get_fallback_mappings():
     """Fallback mappings when database is unavailable"""
@@ -437,359 +597,9 @@ def get_fallback_mappings():
         }
     }
 
-def create_enhanced_quickbooks_journal(pivot_df, raw_df):
-    """Create enhanced QuickBooks journal entries with proper account mappings and VAT handling"""
-    try:
-        journal_entries = []
-        entry_date = datetime.now().strftime('%Y-%m-%d')
+# Removed duplicate function - using import from scripts.journal_exports
 
-        # Retrieve QuickBooks account mappings
-        qb_mappings = get_quickbooks_mappings()
-
-        # Get fee mappings for detailed breakdown
-        fee_mappings = execute_query("""
-            SELECT t.name as tour_name, f.name as fee_name, f.per_person_amount
-            FROM tour_fees tf
-            JOIN tours t ON tf.tour_id = t.id
-            JOIN fees f ON tf.fee_id = f.id
-            ORDER BY t.name, f.name
-        """)
-
-        fee_mappings_df = pd.DataFrame(fee_mappings, columns=['tour_name', 'fee_name', 'per_person_amount']) if fee_mappings else pd.DataFrame()
-        if not fee_mappings_df.empty:
-            fee_mappings_df['per_person_amount'] = pd.to_numeric(fee_mappings_df['per_person_amount'], errors='coerce').fillna(0)
-
-        entry_number = 1
-        total_vat_amount = 0
-
-        # Separate affiliate and direct bookings from raw_df
-        affiliate_bookings = raw_df[raw_df['Affiliate'].notna() & (raw_df['Affiliate'] != '')].copy()
-        direct_bookings = raw_df[~(raw_df['Affiliate'].notna() & (raw_df['Affiliate'] != ''))].copy()
-
-        # Separate payments and refunds
-        payments_df = raw_df[raw_df['Payment or Refund'] == 'Payment'].copy()
-        refunds_df = raw_df[raw_df['Payment or Refund'] == 'Refund'].copy()
-
-        # Calculate total VAT from direct bookings only (payments only, not refunds)
-        payments_only_df = direct_bookings[direct_bookings['Payment or Refund'] == 'Payment']
-        if not payments_only_df.empty and 'Tax Paid' in payments_only_df.columns:
-            total_vat_amount = pd.to_numeric(payments_only_df['Tax Paid'], errors='coerce').fillna(0).sum()
-            st.write(f"DEBUG: VAT calculation from Tax Paid column")
-            st.write(f"DEBUG: Payments only rows: {len(payments_only_df)}")
-            st.write(f"DEBUG: Total VAT amount: {total_vat_amount}")
-        else:
-            total_vat_amount = 0
-            st.write("DEBUG: No Tax Paid column found or no payment rows")
-
-        # Calculate affiliate commissions and payables/receivables
-        affiliate_commissions = {}
-        affiliate_payables = {}
-        affiliate_receivables = {}
-
-        if not affiliate_bookings.empty:
-            for _, row in affiliate_bookings.iterrows():
-                affiliate_name = row.get('Affiliate', 'Unknown Affiliate')
-                total_paid = pd.to_numeric(row.get('Total Paid', 0), errors='coerce')
-                payable_to_affiliate = pd.to_numeric(row.get('Payable to Affiliate', 0), errors='coerce')
-                paid_to_affiliate = pd.to_numeric(row.get('Paid to Affiliate', 0), errors='coerce')
-                receivable_from_affiliate = pd.to_numeric(row.get('Receivable from Affiliate', 0), errors='coerce')
-                received_from_affiliate = pd.to_numeric(row.get('Received from Affiliate', 0), errors='coerce')
-
-                commission_expense = 0
-
-                # Scenario 1: Affiliate collects payment (we have receivable from them)
-                if receivable_from_affiliate > 0 or received_from_affiliate > 0:
-                    # Commission = Total Paid - Affiliate Collection
-                    affiliate_collection = receivable_from_affiliate + received_from_affiliate
-                    commission_expense = total_paid - affiliate_collection
-
-                    # Track receivables (affiliate collected payment, owes us the difference)
-                    if affiliate_name in affiliate_receivables:
-                        affiliate_receivables[affiliate_name] += affiliate_collection
-                    else:
-                        affiliate_receivables[affiliate_name] = affiliate_collection
-
-                # Scenario 2: We collect payment (we pay commission to affiliate)
-                elif payable_to_affiliate > 0 or paid_to_affiliate > 0:
-                    commission_expense = payable_to_affiliate + paid_to_affiliate
-
-                    # Track payables (we collected payment, owe commission to affiliate)
-                    affiliate_payment = payable_to_affiliate + paid_to_affiliate
-                    if affiliate_name in affiliate_payables:
-                        affiliate_payables[affiliate_name] += affiliate_payment
-                    else:
-                        affiliate_payables[affiliate_name] = affiliate_payment
-
-                # Track commission expense by affiliate
-                if commission_expense > 0:
-                    if affiliate_name in affiliate_commissions:
-                        affiliate_commissions[affiliate_name] += commission_expense
-                    else:
-                        affiliate_commissions[affiliate_name] = commission_expense
-
-        # Note: Refunds are already accounted for in Net Revenue Collected
-        # No separate refund processing needed
-
-        # Calculate total payments by payment type from ALL bookings
-        # Use Subtotal Paid + Tax Paid (don't subtract tour fees)
-        total_payments_by_type = {}
-
-        # Process DIRECT bookings payments
-        for _, row in pivot_df.iterrows():
-            tour_name = row['Tour Name']
-            # Only use direct booking transactions for payments
-            tour_transactions = direct_bookings[direct_bookings['Item'] == tour_name].copy()
-
-            if not tour_transactions.empty:
-                # Calculate payment breakdown using Subtotal Paid + Tax Paid
-                tour_payment_breakdown = {}
-                for _, transaction in tour_transactions.iterrows():
-                    payment_type = transaction.get('Payment Type', 'Unknown')
-                    subtotal_paid = pd.to_numeric(transaction.get('Subtotal Paid', 0), errors='coerce')
-                    tax_paid = pd.to_numeric(transaction.get('Tax Paid', 0), errors='coerce')
-                    total_payment = subtotal_paid + tax_paid
-
-                    if payment_type in tour_payment_breakdown:
-                        tour_payment_breakdown[payment_type] += total_payment
-                    else:
-                        tour_payment_breakdown[payment_type] = total_payment
-
-                # Add to overall totals
-                for payment_type, amount in tour_payment_breakdown.items():
-                    if payment_type in total_payments_by_type:
-                        total_payments_by_type[payment_type] += amount
-                    else:
-                        total_payments_by_type[payment_type] = amount
-
-        # Process AFFILIATE bookings payments as separate payment types
-        affiliate_payments_by_type = {}
-        if not affiliate_bookings.empty:
-            for _, row in affiliate_bookings.iterrows():
-                affiliate_name = row.get('Affiliate', 'Unknown Affiliate')
-                payment_type = row.get('Payment Type', 'Unknown')
-
-                # For affiliate payments, capture both Received and Receivable amounts
-                received_from_affiliate = pd.to_numeric(row.get('Received from Affiliate', 0), errors='coerce')
-                receivable_from_affiliate = pd.to_numeric(row.get('Receivable from Affiliate', 0), errors='coerce')
-                paid_to_affiliate = pd.to_numeric(row.get('Paid to Affiliate', 0), errors='coerce')
-                payable_to_affiliate = pd.to_numeric(row.get('Payable to Affiliate', 0), errors='coerce')
-
-                # Total affiliate payment received/collected
-                total_affiliate_payment = received_from_affiliate + receivable_from_affiliate
-
-                # If there are payments received from affiliate, create affiliate payment type
-                if total_affiliate_payment > 0:
-                    affiliate_payment_type = f'Affiliate Payment - {affiliate_name}'
-                    if affiliate_payment_type in affiliate_payments_by_type:
-                        affiliate_payments_by_type[affiliate_payment_type] += total_affiliate_payment
-                    else:
-                        affiliate_payments_by_type[affiliate_payment_type] = total_affiliate_payment
-
-            # Add affiliate payments to total payments
-            for affiliate_payment_type, payment_amount in affiliate_payments_by_type.items():
-                if affiliate_payment_type in total_payments_by_type:
-                    total_payments_by_type[affiliate_payment_type] += payment_amount
-                else:
-                    total_payments_by_type[affiliate_payment_type] = payment_amount
-
-        # Create ONE consolidated journal entry
-        je_number = f'JE{entry_number:04d}'
-
-        # Calculate total fees by fee type across all tours
-        total_fees_by_type = {}
-        for _, row in pivot_df.iterrows():
-            tour_name = row['Tour Name']
-            total_guests = pd.to_numeric(row.get('Total Guests', 0), errors='coerce')
-            total_fee_revenue = pd.to_numeric(row.get('Total Fee Revenue', 0), errors='coerce')
-
-            if not fee_mappings_df.empty and total_fee_revenue > 0:
-                tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour_name]
-
-                for _, fee_row in tour_fees.iterrows():
-                    fee_amount = fee_row['per_person_amount'] * total_guests
-                    if fee_amount > 0:
-                        fee_name = fee_row['fee_name']
-                        if fee_name in total_fees_by_type:
-                            total_fees_by_type[fee_name] += fee_amount
-                        else:
-                            total_fees_by_type[fee_name] = fee_amount
-
-        # REVENUE SIDE (Credits) - All revenue types in one entry
-
-        # 1. Direct Tour Revenue Credits (ex-VAT from Subtotal Paid, excluding affiliate bookings)
-        for _, row in pivot_df.iterrows():
-            tour_name = row['Tour Name']
-            subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
-
-            # Get fee split for this tour
-            total_guests = pd.to_numeric(row.get('Total Guests', 0), errors='coerce')
-            tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour_name] if not fee_mappings_df.empty else pd.DataFrame()
-            total_fee_amount = 0
-
-            if not tour_fees.empty:
-                for _, fee_row in tour_fees.iterrows():
-                    fee_amount = fee_row['per_person_amount'] * total_guests
-                    total_fee_amount += fee_amount
-
-            # Tour revenue = Subtotal Paid - Tour Fees
-            tour_revenue = subtotal_paid - total_fee_amount
-
-            # 1. Direct Tour Revenue Credit (ex-VAT)
-            if tour_revenue > 0:
-                tour_revenue_account = qb_mappings["tour_revenue"].get(tour_name, {}).get("account", f"Tour Revenue - {tour_name}")
-                journal_entries.append({
-                    'Entry Number': je_number,
-                                'Date': entry_date,
-                    'Account': tour_revenue_account,
-                    'Description': f'{tour_name} revenue',
-                                'Debit': '',
-                    'Credit': f'{tour_revenue:.2f}',
-                    'Memo': f'Direct tour revenue for {tour_name} (ex-VAT)'
-                })
-
-        # 2. Affiliate Booking Revenue Credits (ex-VAT)
-        affiliate_revenue_by_tour = {}
-        if not affiliate_bookings.empty:
-            for _, row in affiliate_bookings.iterrows():
-                tour_name = row.get('Item', 'Unknown Tour')
-                subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
-
-                if subtotal_paid > 0:
-                    if tour_name in affiliate_revenue_by_tour:
-                        affiliate_revenue_by_tour[tour_name] += subtotal_paid
-                    else:
-                        affiliate_revenue_by_tour[tour_name] = subtotal_paid
-
-            # Create revenue entries for affiliate bookings
-            for tour_name, revenue_amount in affiliate_revenue_by_tour.items():
-                if revenue_amount > 0:
-                    tour_revenue_account = qb_mappings['tour_revenue'].get(tour_name, {}).get('account', f'Tour Revenue - {tour_name}')
-                    journal_entries.append({
-                        'Entry Number': je_number,
-                        'Date': entry_date,
-                        'Account': tour_revenue_account,
-                        'Description': f'{tour_name} affiliate revenue',
-                        'Debit': '',
-                        'Credit': f'{revenue_amount:.2f}',
-                        'Memo': f'Affiliate booking revenue for {tour_name} (ex-VAT)'
-                    })
-
-        # 3. Fee Revenue Credits (ex-VAT, summed by fee type)
-        for fee_name, total_fee_amount in total_fees_by_type.items():
-            if total_fee_amount > 0:
-                fee_revenue_account = qb_mappings['fee_revenue'].get(fee_name, {}).get('account', f'Fee Revenue - {fee_name}')
-                journal_entries.append({
-                    'Entry Number': je_number,
-                                        'Date': entry_date,
-                    'Account': fee_revenue_account,
-                    'Description': f'{fee_name}',
-                                        'Debit': '',
-                    'Credit': f'{total_fee_amount:.2f}',
-                    'Memo': f'{fee_name} revenue (all tours, ex-VAT)'
-                })
-
-        # 4. Affiliate Commission Expense (debits) and Payables/Receivables
-        for affiliate_name, commission_amount in affiliate_commissions.items():
-            if commission_amount > 0:
-                # Debit: Commission Expense
-                journal_entries.append({
-                    'Entry Number': je_number,
-                    'Date': entry_date,
-                    'Account': 'Affiliate Commission Expense',
-                    'Description': f'{affiliate_name} commission expense',
-                    'Debit': f'{commission_amount:.2f}',
-                    'Credit': '',
-                    'Memo': f'Commission expense to {affiliate_name}'
-                })
-
-                # Credit: Affiliate Payable or Debit: Affiliate Receivable
-                if affiliate_name in affiliate_payables and affiliate_payables[affiliate_name] > 0:
-                    # We owe commission to affiliate (we collected payment)
-                    journal_entries.append({
-                        'Entry Number': je_number,
-                        'Date': entry_date,
-                        'Account': f'Accounts Payable - {affiliate_name}',
-                        'Description': f'{affiliate_name} commission payable',
-                        'Debit': '',
-                        'Credit': f'{affiliate_payables[affiliate_name]:.2f}',
-                        'Memo': f'Commission payable to {affiliate_name}'
-                    })
-                elif affiliate_name in affiliate_receivables and affiliate_receivables[affiliate_name] > 0:
-                    # Affiliate owes us (they collected payment)
-                    journal_entries.append({
-                        'Entry Number': je_number,
-                        'Date': entry_date,
-                        'Account': f'Accounts Receivable - {affiliate_name}',
-                        'Description': f'{affiliate_name} commission receivable',
-                        'Debit': f'{affiliate_receivables[affiliate_name]:.2f}',
-                        'Credit': '',
-                        'Memo': f'Commission receivable from {affiliate_name}'
-                    })
-
-        # 5. VAT Credit (single summed amount from direct bookings)
-        if total_vat_amount > 0:
-                journal_entries.append({
-                'Entry Number': je_number,
-                    'Date': entry_date,
-                'Account': 'Sales VAT',
-                'Description': 'VAT on direct sales',
-                    'Debit': '',
-                'Credit': f'{total_vat_amount:.2f}',
-                'Memo': f'VAT collected on direct sales (${total_vat_amount:.2f})'
-            })
-
-        # PAYMENT SIDE (Debits) - All payments in one entry
-
-        # 1. Direct booking payments
-        for payment_type, total_amount in total_payments_by_type.items():
-            if total_amount > 0:
-                payment_account = qb_mappings['payment_type'].get(payment_type, {}).get('account', get_payment_account(payment_type))
-
-                journal_entries.append({
-                    'Entry Number': je_number,
-                    'Date': entry_date,
-                    'Account': payment_account,
-                    'Description': f'{payment_type} payment',
-                    'Debit': f'{total_amount:.2f}',
-                    'Credit': '',
-                    'Memo': f'Direct booking payment via {payment_type}'
-                })
-
-        # 2. Affiliate payment receipts (from affiliate payments collected)
-        for affiliate_payment_type, payment_amount in affiliate_payments_by_type.items():
-            if payment_amount > 0:
-                # Extract affiliate name from payment type
-                if 'Affiliate Payment - ' in affiliate_payment_type:
-                    affiliate_name = affiliate_payment_type.replace('Affiliate Payment - ', '')
-
-                journal_entries.append({
-                    'Entry Number': je_number,
-                    'Date': entry_date,
-                    'Account': f'Accounts Receivable - {affiliate_name}',
-                    'Description': f'{affiliate_name} payment received',
-                    'Debit': f'{payment_amount:.2f}',
-                    'Credit': '',
-                    'Memo': f'Payment received from affiliate {affiliate_name}'
-                })
-
-        # Note: Refunds are already accounted for in Net Revenue Collected
-        # No separate refund entries needed
-
-                entry_number += 1
-
-        # Convert to DataFrame
-        if journal_entries:
-            journal_df = pd.DataFrame(journal_entries)
-            return journal_df
-        else:
-            st.warning("⚠️ No journal entries generated. Check if data contains valid amounts.")
-            return pd.DataFrame()
-
-    except Exception as e:
-        st.error(f"❌ Error creating enhanced QuickBooks journal: {str(e)}")
-        import traceback
-        st.error(f"Details: {traceback.format_exc()}")
-        return pd.DataFrame()
+# Removed duplicate V2 function - using import from scripts.journal_exports
 
 def calculate_payment_breakdown(transactions):
     """Calculate payment amounts by payment type for a tour"""
@@ -908,6 +718,188 @@ def get_payment_account(payment_type):
     # Default fallback
     return 'Accounts Receivable'
 
+def calculate_proportional_fees_streamlit(subtotal_paid, subtotal_total, total_fees_for_booking):
+    """
+    Calculate proportional fees based on partial payment - same logic as test script
+    Formula: (Subtotal Paid / Subtotal Total) * Total Fees
+    
+    Special cases:
+    - If subtotal_total is 0, return 0
+    - If payment >= subtotal (overpayment), cap proportion at 1.0 (100% of fees)
+    """
+    if subtotal_total == 0:
+        return 0
+    
+    proportion = abs(subtotal_paid) / subtotal_total  # Use abs for refunds
+    
+    # Cap proportion at 1.0 for overpayment scenarios
+    proportion = min(proportion, 1.0)
+    
+    return proportion * total_fees_for_booking
+
+
+def display_payment_refund_pivot_table(df):
+    """Display pivot table with Payment/Refund breakdown by tour matching the requested layout"""
+    try:
+        # Get fee mappings from database for calculations
+        fee_mappings = execute_query("""
+            SELECT t.name as tour_name, f.name as fee_name, f.per_person_amount
+            FROM tour_fees tf
+            JOIN tours t ON tf.tour_id = t.id
+            JOIN fees f ON tf.fee_id = f.id
+            ORDER BY t.name, f.name
+        """)
+        
+        fee_mappings_df = pd.DataFrame(fee_mappings, columns=['tour_name', 'fee_name', 'per_person_amount']) if fee_mappings else pd.DataFrame()
+        if not fee_mappings_df.empty:
+            fee_mappings_df['per_person_amount'] = pd.to_numeric(fee_mappings_df['per_person_amount'], errors='coerce').fillna(0)
+
+        # Create the pivot structure
+        pivot_data = []
+        
+        # Get unique tours
+        tours = df['Item'].unique()
+        
+        # Process payments - using proportional fees like test script
+        payments_df = df[df['Payment or Refund'] == 'Payment']
+        for tour in tours:
+            tour_payments = payments_df[payments_df['Item'] == tour]
+            if not tour_payments.empty:
+                total_ex_fee_subtotal = 0
+                total_proportional_fees = 0
+                
+                # Process each payment transaction separately for proportional fees
+                for _, row in tour_payments.iterrows():
+                    subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
+                    subtotal_total = pd.to_numeric(row.get('Subtotal', 0), errors='coerce')
+                    guests = pd.to_numeric(row.get('# of Pax', 0), errors='coerce')
+                    
+                    # Calculate total fees for this booking (full booking)
+                    total_fees_for_booking = 0
+                    if not fee_mappings_df.empty:
+                        tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour]
+                        for _, fee_row in tour_fees.iterrows():
+                            total_fees_for_booking += fee_row['per_person_amount'] * guests
+                    
+                    # Calculate proportional fees based on payment amount
+                    proportional_fees = calculate_proportional_fees_streamlit(subtotal_paid, subtotal_total, float(total_fees_for_booking))
+                    
+                    # Ex-fee subtotal = Subtotal Paid - Proportional Fees
+                    ex_fee_subtotal = subtotal_paid - proportional_fees
+                    
+                    total_ex_fee_subtotal += ex_fee_subtotal
+                    total_proportional_fees += proportional_fees
+                
+                pivot_data.append({
+                    'Payment or Refund': 'Payment',
+                    'Item': tour,
+                    'SUM of Ex fee sub paid': total_ex_fee_subtotal,
+                    'SUM of Fees': total_proportional_fees
+                })
+        
+        # Process refunds - using proportional fees like test script
+        refunds_df = df[df['Payment or Refund'] == 'Refund']
+        for tour in tours:
+            tour_refunds = refunds_df[refunds_df['Item'] == tour]
+            if not tour_refunds.empty:
+                total_ex_fee_subtotal = 0
+                total_proportional_fees = 0
+                
+                # Process each refund transaction separately for proportional fees
+                for _, row in tour_refunds.iterrows():
+                    subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
+                    subtotal_total = pd.to_numeric(row.get('Subtotal', 0), errors='coerce')
+                    guests = pd.to_numeric(row.get('# of Pax', 0), errors='coerce')
+                    
+                    # Calculate total fees for this booking (full booking)
+                    total_fees_for_booking = 0
+                    if not fee_mappings_df.empty:
+                        tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour]
+                        for _, fee_row in tour_fees.iterrows():
+                            total_fees_for_booking += fee_row['per_person_amount'] * guests
+                    
+                    # Calculate proportional fees based on refund amount
+                    proportional_fees = calculate_proportional_fees_streamlit(subtotal_paid, subtotal_total, float(total_fees_for_booking))
+                    
+                    # Ex-fee subtotal = Subtotal Paid + Proportional Fees (since subtotal_paid is already negative)
+                    ex_fee_subtotal = subtotal_paid + proportional_fees
+                    
+                    total_ex_fee_subtotal += ex_fee_subtotal
+                    total_proportional_fees += proportional_fees
+                
+                pivot_data.append({
+                    'Payment or Refund': 'Refund',
+                    'Item': tour,
+                    'SUM of Ex fee sub paid': total_ex_fee_subtotal,
+                    'SUM of Fees': -total_proportional_fees  # Negative for refunds
+                })
+        
+        # Convert to DataFrame
+        pivot_df = pd.DataFrame(pivot_data)
+        
+        if pivot_df.empty:
+            st.warning("No data available for pivot table")
+            return
+        
+        # Create totals
+        payment_totals = pivot_df[pivot_df['Payment or Refund'] == 'Payment'].agg({
+            'SUM of Ex fee sub paid': 'sum',
+            'SUM of Fees': 'sum'
+        })
+        
+        refund_totals = pivot_df[pivot_df['Payment or Refund'] == 'Refund'].agg({
+            'SUM of Ex fee sub paid': 'sum', 
+            'SUM of Fees': 'sum'
+        })
+        
+        # Add total rows
+        pivot_df = pd.concat([
+            pivot_df,
+            pd.DataFrame([{
+                'Payment or Refund': 'Payment Total',
+                'Item': '',
+                'SUM of Ex fee sub paid': payment_totals['SUM of Ex fee sub paid'],
+                'SUM of Fees': payment_totals['SUM of Fees']
+            }]),
+            pd.DataFrame([{
+                'Payment or Refund': 'Refund Total', 
+                'Item': '',
+                'SUM of Ex fee sub paid': refund_totals['SUM of Ex fee sub paid'],
+                'SUM of Fees': refund_totals['SUM of Fees']
+            }]),
+            pd.DataFrame([{
+                'Payment or Refund': 'Grand Total',
+                'Item': '',
+                'SUM of Ex fee sub paid': payment_totals['SUM of Ex fee sub paid'] + refund_totals['SUM of Ex fee sub paid'],
+                'SUM of Fees': payment_totals['SUM of Fees'] + refund_totals['SUM of Fees']
+            }])
+        ], ignore_index=True)
+        
+        # Format for display
+        display_df = pivot_df.copy()
+        
+        # Format currency columns
+        for col in ['SUM of Ex fee sub paid', 'SUM of Fees']:
+            display_df[col] = display_df[col].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "0")
+        
+        # Display the table
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Payment or Refund": st.column_config.TextColumn("Payment or Refund", width="small"),
+                "Item": st.column_config.TextColumn("Item", width="medium"),
+                "SUM of Ex fee sub paid": st.column_config.TextColumn("SUM of Ex fee sub paid", width="medium"),
+                "SUM of Fees": st.column_config.TextColumn("SUM of Fees", width="medium"),
+            }
+        )
+
+    except Exception as e:
+        st.error(f"❌ Error displaying payment/refund pivot table: {str(e)}")
+        # Fallback to original function
+        display_pivot_table_fallback(df)
+
 def display_pivot_table(pivot_df):
     """Display the pivot table with nice formatting"""
     try:
@@ -984,6 +976,12 @@ def display_pivot_table(pivot_df):
         st.error(f"Data types: {pivot_df.dtypes.to_dict()}")
         # Fallback to basic display
         st.dataframe(pivot_df, use_container_width=True)
+
+def display_pivot_table_fallback(df):
+    """Fallback function for pivot table display"""
+    pivot_data = create_tour_pivot_table(df)
+    if not pivot_data.empty:
+        display_pivot_table(pivot_data)
 
 def create_payment_affiliate_breakdown(df):
     """Create detailed payment type and affiliate breakdown analysis"""

@@ -289,15 +289,17 @@ def load_sales_csv_data(file):
 
         for col in numeric_columns:
             if col in df.columns:
-                # Handle currency format: remove $, commas, and handle negative values
+                # Handle currency format: remove $, commas, and preserve negative values
                 # Convert to string first, then clean
                 df[col] = df[col].astype(str)
-                # Remove currency symbols, commas, and handle negative values in format like "-$0.81"
-                df[col] = df[col].str.replace('[$,"]', '', regex=True)
-                # Handle negative values in format like "-$0.81"
-                df[col] = df[col].str.replace('-', '', regex=False)
+                # Check if value starts with negative sign and preserve it
+                is_negative = df[col].str.startswith('-')
+                # Remove currency symbols, commas, and quotes
+                df[col] = df[col].str.replace('[$,"-]', '', regex=True)
                 # Convert to numeric
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                # Apply negative sign back where needed
+                df[col] = df[col] * is_negative.map({True: -1, False: 1})
 
         # Filter out rows where Item is empty or NaN (likely empty rows)
         if 'Item' in df.columns:

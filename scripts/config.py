@@ -26,4 +26,4 @@ NOTES_FILES = {
 }
 
 # Default password (should be changed in production)
-DEFAULT_PASSWORD = "fareharbour2024"
+DEFAULT_PASSWORD = "1234"
