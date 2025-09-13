@@ -490,7 +490,7 @@ def create_sales_pivot_analysis(df):
             st.markdown("### 🎯 Export Options")
             include_processing_fees = st.checkbox(
                 "💳 Include Processing Fee Expenses", 
-                value=False,
+                value=True,
                 help="Include platform processing fees (Stripe, PayPal, etc.) as separate expense lines in journal entries"
             )
             

@@ -389,11 +389,14 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df, include_processing_fees
                     })
 
         # 5. VAT Credits - separate payments and refunds
+        # Get the sales VAT liability account from mappings
+        sales_vat_account = qb_mappings.get('sales_vat_liability', {}).get('Sales VAT', {}).get('account', 'Sales Tax Payable')
+        
         if total_vat_payments > 0:
             journal_entries.append({
                 'Entry Number': je_number,
                 'Date': entry_date,
-                'Account': 'Sales VAT',
+                'Account': sales_vat_account,
                 'Description': 'VAT on direct payments',
                 'Debit': '',
                 'Credit': f'{total_vat_payments:.2f}',
@@ -405,7 +408,7 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df, include_processing_fees
             journal_entries.append({
                 'Entry Number': je_number,
                 'Date': entry_date,
-                'Account': 'Sales VAT',
+                'Account': sales_vat_account,
                 'Description': 'VAT on refunds',
                 'Debit': f'{total_vat_refunds:.2f}',
                 'Credit': '',
@@ -419,6 +422,9 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df, include_processing_fees
                     # Get the payment account for this payment type
                     payment_account = qb_mappings['payment_type'].get(payment_type, {}).get('account', get_payment_account(payment_type))
                     
+                    # Get the processing fee expense account from mappings (single account for all payment types)
+                    processing_fee_account = qb_mappings.get('processing_fee_expense', {}).get('Processing Fees', {}).get('account', 'Processing Fee Expense')
+                    
                     # Processing fees: 
                     # - For payments (negative): Debit expense, Credit payment clearing
                     # - For refunds (positive): Credit expense, Debit payment clearing
@@ -429,7 +435,7 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df, include_processing_fees
                         journal_entries.append({
                             'Entry Number': je_number,
                             'Date': entry_date,
-                            'Account': f'Processing Fee Expense - {payment_type}',
+                            'Account': processing_fee_account,
                             'Description': f'{payment_type} processing fee expense (V1)',
                             'Debit': f'{abs(total_processing_fee):.2f}',
                             'Credit': '',
@@ -452,7 +458,7 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df, include_processing_fees
                         journal_entries.append({
                             'Entry Number': je_number,
                             'Date': entry_date,
-                            'Account': f'Processing Fee Expense - {payment_type}',
+                            'Account': processing_fee_account,
                             'Description': f'{payment_type} processing fee refund (V1)',
                             'Debit': '',
                             'Credit': f'{total_processing_fee:.2f}',
@@ -894,11 +900,14 @@ def create_enhanced_quickbooks_journal_v2(pivot_df, raw_df, include_processing_f
         # 4. No affiliate commission processing needed - V2 filter excludes these
 
         # 5. VAT Credits - separate payments and refunds - V2
+        # Get the sales VAT liability account from mappings
+        sales_vat_account = qb_mappings.get('sales_vat_liability', {}).get('Sales VAT', {}).get('account', 'Sales Tax Payable')
+        
         if total_vat_payments > 0:
             journal_entries.append({
                 'Entry Number': je_number,
                 'Date': entry_date,
-                'Account': 'Sales VAT',
+                'Account': sales_vat_account,
                 'Description': 'VAT on direct payments (V2)',
                 'Debit': '',
                 'Credit': f'{total_vat_payments:.2f}',
@@ -910,7 +919,7 @@ def create_enhanced_quickbooks_journal_v2(pivot_df, raw_df, include_processing_f
             journal_entries.append({
                 'Entry Number': je_number,
                 'Date': entry_date,
-                'Account': 'Sales VAT',
+                'Account': sales_vat_account,
                 'Description': 'VAT on refunds (V2)',
                 'Debit': f'{total_vat_refunds:.2f}',
                 'Credit': '',
@@ -924,6 +933,9 @@ def create_enhanced_quickbooks_journal_v2(pivot_df, raw_df, include_processing_f
                     # Get the payment account for this payment type
                     payment_account = qb_mappings['payment_type'].get(payment_type, {}).get('account', get_payment_account(payment_type))
                     
+                    # Get the processing fee expense account from mappings (single account for all payment types)
+                    processing_fee_account = qb_mappings.get('processing_fee_expense', {}).get('Processing Fees', {}).get('account', 'Processing Fee Expense')
+                    
                     # Processing fees: 
                     # - For payments (negative): Debit expense, Credit payment clearing
                     # - For refunds (positive): Credit expense, Debit payment clearing
@@ -934,7 +946,7 @@ def create_enhanced_quickbooks_journal_v2(pivot_df, raw_df, include_processing_f
                         journal_entries.append({
                             'Entry Number': je_number,
                             'Date': entry_date,
-                            'Account': f'Processing Fee Expense - {payment_type}',
+                            'Account': processing_fee_account,
                             'Description': f'{payment_type} processing fee expense (V2)',
                             'Debit': f'{abs(total_processing_fee):.2f}',
                             'Credit': '',
@@ -957,7 +969,7 @@ def create_enhanced_quickbooks_journal_v2(pivot_df, raw_df, include_processing_f
                         journal_entries.append({
                             'Entry Number': je_number,
                             'Date': entry_date,
-                            'Account': f'Processing Fee Expense - {payment_type}',
+                            'Account': processing_fee_account,
                             'Description': f'{payment_type} processing fee refund (V2)',
                             'Debit': '',
                             'Credit': f'{total_processing_fee:.2f}',
@@ -1167,7 +1179,9 @@ def get_quickbooks_mappings():
             mapping_dict = {
                 'tour_revenue': {},
                 'fee_revenue': {},
-                'payment_type': {}
+                'payment_type': {},
+                'processing_fee_expense': {},
+                'sales_vat_liability': {}
             }
 
             for mapping in mappings:
@@ -1199,6 +1213,12 @@ def get_fallback_mappings():
             'PayPal': {'account': 'PayPal Clearing', 'account_type': 'asset', 'account_id': ''},
             'Check': {'account': 'Undeposited Funds', 'account_type': 'asset', 'account_id': ''},
             'Bank Transfer': {'account': 'Bank Transfer Clearing', 'account_type': 'asset', 'account_id': ''},
+        },
+        'processing_fee_expense': {
+            'Processing Fees': {'account': 'Processing Fee Expense', 'account_type': 'expense', 'account_id': ''}
+        },
+        'sales_vat_liability': {
+            'Sales VAT': {'account': 'Sales Tax Payable', 'account_type': 'liability', 'account_id': ''}
         }
     }
 

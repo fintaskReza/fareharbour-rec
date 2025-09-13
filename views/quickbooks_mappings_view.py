@@ -152,7 +152,7 @@ def quickbooks_mappings_page():
         st.info("🔍 **Debug Mode Active** - Enhanced logging enabled for database operations")
 
     # Create tabs for different mapping types
-    tab1, tab2, tab3 = st.tabs(["🎪 Tour Revenue Mappings", "💰 Fee Revenue Mappings", "💳 Payment Type Mappings"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🎪 Tour Revenue Mappings", "💰 Fee Revenue Mappings", "💳 Payment Type Mappings", "🔄 Processing Fee Mappings"])
 
     # Extract data from CSV if uploaded
     tours_list, fees_list, payment_types_list = [], [], []
@@ -172,6 +172,11 @@ def quickbooks_mappings_page():
     with tab3:
         st.subheader("💳 Payment Type Mappings")
         create_payment_type_mappings_table(payment_types_list)
+
+    with tab4:
+        st.subheader("🔄 Special Account Mappings")
+        st.info("💡 **Special Account Mappings**: Configure accounts for processing fees and sales VAT that are used across all journal exports.")
+        create_special_mappings_table()
 
     # Global save/reset actions
     st.markdown("---")
@@ -1030,6 +1035,146 @@ def create_payment_type_mappings_table(payment_types_list):
         if changes_made:
             st.rerun()
 
+def create_special_mappings_table():
+    """Create editable table for special account mappings (processing fees and sales VAT)"""
+    qb_accounts = get_quickbooks_accounts()
+    expense_accounts = qb_accounts.get('Expense Accounts', [])
+    liability_accounts = qb_accounts.get('Liability Accounts', [])
+    
+    # If no accounts loaded, use fallback
+    if not expense_accounts:
+        st.warning("⚠️ **No expense accounts loaded yet!** Special mappings will show fallback accounts.")
+        st.info("💡 Click 'Load QuickBooks Accounts' in the sidebar to get real QuickBooks accounts.")
+        expense_accounts = [
+            "Processing Fee Expense",
+            "Bank Service Charges", 
+            "Merchant Processing Fees"
+        ]
+    
+    if not liability_accounts:
+        liability_accounts = [
+            "Sales Tax Payable",
+            "VAT Payable",
+            "GST Payable"
+        ]
+
+    # Define the special mappings we need
+    special_mappings = [
+        {
+            'mapping_type': 'processing_fee_expense',
+            'fareharbour_item': 'Processing Fees',
+            'description': 'Expense account for all payment processing fees (Stripe, PayPal, etc.)',
+            'account_options': expense_accounts,
+            'suggested_account': 'Processing Fee Expense'
+        },
+        {
+            'mapping_type': 'sales_vat_liability',
+            'fareharbour_item': 'Sales VAT',
+            'description': 'Liability account for sales VAT/tax collected from customers',
+            'account_options': liability_accounts,
+            'suggested_account': 'Sales Tax Payable'
+        }
+    ]
+
+    # Get existing mappings
+    existing_mappings = {
+        f"{mapping['mapping_type']}_{mapping['fareharbour_item']}": mapping
+        for mapping in st.session_state.qb_mappings_data
+        if mapping['mapping_type'] in ['processing_fee_expense', 'sales_vat_liability']
+    }
+
+    # Show explanation
+    st.markdown("""
+    **Special Account Mappings:**
+    - **Processing Fees**: Single expense account for all payment processing fees across all payment types
+    - **Sales VAT**: Liability account for VAT/sales tax collected from customers and owed to tax authorities
+    
+    These accounts are used globally across all journal exports when the respective features are enabled.
+    """)
+
+    # Prepare data for data editor
+    mappings_data = []
+    for special in special_mappings:
+        mapping_key = f"{special['mapping_type']}_{special['fareharbour_item']}"
+        existing = existing_mappings.get(mapping_key, {})
+        qb_account = existing.get('quickbooks_account', '') if existing else ''
+        
+        mappings_data.append({
+            'Account Type': special['fareharbour_item'],
+            'Description': special['description'],
+            'QuickBooks Account': qb_account,
+            'Suggested Account': special['suggested_account'],
+            'Status': 'Mapped' if existing and qb_account else 'Unmapped',
+            '_mapping_type': special['mapping_type'],
+            '_account_options': special['account_options']
+        })
+
+    # Create data editor
+    editor_key = "special_mappings_editor"
+
+    def on_special_mapping_change():
+        pass
+
+    # Combine all account options for dropdown
+    all_account_options = list(set(expense_accounts + liability_accounts + 
+                                 [row['QuickBooks Account'] for row in mappings_data if row['QuickBooks Account']] +
+                                 [row['Suggested Account'] for row in mappings_data]))
+
+    edited_df = st.data_editor(
+        pd.DataFrame(mappings_data),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Account Type": st.column_config.TextColumn("Account Type", disabled=True, width="small"),
+            "Description": st.column_config.TextColumn("Description", disabled=True, width="large"),
+            "QuickBooks Account": st.column_config.SelectboxColumn(
+                "QuickBooks Account", options=all_account_options, width="medium"
+            ),
+            "Suggested Account": st.column_config.TextColumn("Suggested", disabled=True, width="small"),
+            "Status": st.column_config.TextColumn("Status", disabled=True, width="small"),
+            "_mapping_type": st.column_config.TextColumn("_mapping_type", disabled=True, width=None),
+            "_account_options": st.column_config.TextColumn("_account_options", disabled=True, width=None)
+        },
+        key=editor_key,
+        on_change=on_special_mapping_change,
+        column_order=["Account Type", "Description", "QuickBooks Account", "Suggested Account", "Status"]
+    )
+
+    # Process changes and update session state
+    changes_made = False
+    for idx, row in edited_df.iterrows():
+        account_type = row['Account Type']
+        qb_account = row['QuickBooks Account']
+        mapping_type = row['_mapping_type']
+
+        # Only update if there's an actual account selected
+        if qb_account and qb_account.strip():
+            mapping_key = f"{mapping_type}_{account_type}"
+            existing = existing_mappings.get(mapping_key, {})
+            
+            # Only update if the account has changed
+            if existing.get('quickbooks_account') != qb_account:
+                # Determine account type based on mapping type
+                if mapping_type == 'processing_fee_expense':
+                    account_type_category = 'expense'
+                elif mapping_type == 'sales_vat_liability':
+                    account_type_category = 'liability'
+                else:
+                    account_type_category = 'other'
+                
+                mapping = {
+                    'mapping_type': mapping_type,
+                    'fareharbour_item': account_type,
+                    'quickbooks_account': qb_account,
+                    'account_type': account_type_category
+                }
+                update_session_mapping(mapping)
+                changes_made = True
+
+    # Force a rerun if changes were made to ensure UI updates
+    if changes_made:
+        st.rerun()
+
 def update_session_mapping(mapping):
     """Update mapping in session state"""
     # Find existing mapping or add new one
@@ -1404,8 +1549,9 @@ def show_mapping_summary():
     tour_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'tour_revenue' and m.get('quickbooks_account')]
     fee_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'fee_revenue' and m.get('quickbooks_account')]
     payment_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'payment_type' and m.get('quickbooks_account')]
+    special_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] in ['processing_fee_expense', 'sales_vat_liability'] and m.get('quickbooks_account')]
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.metric("Tour Mappings", len(tour_mappings))
@@ -1433,3 +1579,13 @@ def show_mapping_summary():
                     account_id = mapping.get('quickbooks_account_id', '')
                     id_info = f" (ID: {account_id})" if account_id else ""
                     st.write(f"• {mapping['fareharbour_item']} → {mapping['quickbooks_account']}{id_info}")
+
+    with col4:
+        st.metric("Special Mappings", len(special_mappings))
+        if special_mappings:
+            with st.expander("View Special Mappings"):
+                for mapping in special_mappings:
+                    account_id = mapping.get('quickbooks_account_id', '')
+                    id_info = f" (ID: {account_id})" if account_id else ""
+                    mapping_type_display = "Processing Fees" if mapping['mapping_type'] == 'processing_fee_expense' else "Sales VAT"
+                    st.write(f"• {mapping_type_display} → {mapping['quickbooks_account']}{id_info}")
