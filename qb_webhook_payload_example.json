@@ -1,0 +1,42 @@
+{
+  "journal_entry": {
+    "DocNumber": "JE0001",
+    "TxnDate": "2024-01-15",
+    "Adjustment": false,
+    "Line": [
+      {
+        "DetailType": "JournalEntryLineDetail",
+        "JournalEntryLineDetail": {
+          "PostingType": "Credit",
+          "AccountRef": {
+            "value": "123",
+            "name": "Tour Revenue - Whales Watching"
+          }
+        },
+        "Amount": 1500.00,
+        "Description": "Whales Watching revenue - payments (V2)",
+        "LineNum": 1
+      },
+      {
+        "DetailType": "JournalEntryLineDetail",
+        "JournalEntryLineDetail": {
+          "PostingType": "Debit",
+          "AccountRef": {
+            "value": "456",
+            "name": "Credit Card Clearing"
+          }
+        },
+        "Amount": 1500.00,
+        "Description": "Credit Card payment (V2)",
+        "LineNum": 2
+      }
+    ]
+  },
+  "metadata": {
+    "source": "FareHarbour Sales Analysis",
+    "generated_at": "2024-01-15T10:30:45.123456",
+    "total_lines": 2,
+    "balance_status": "✅ Balanced",
+    "rounding_adjustment": ""
+  }
+}

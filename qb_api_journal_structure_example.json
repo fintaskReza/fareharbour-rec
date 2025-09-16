@@ -1,0 +1,59 @@
+{
+  "DocNumber": "JE0001",
+  "TxnDate": "2024-01-15",
+  "Adjustment": false,
+  "Line": [
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "123",
+          "name": "Tour Revenue - Whales Watching"
+        }
+      },
+      "Amount": 1500.00,
+      "Description": "Whales Watching revenue - payments (V2)",
+      "LineNum": 1
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "456",
+          "name": "Fee Revenue - Conservation Fee"
+        }
+      },
+      "Amount": 150.00,
+      "Description": "Conservation Fee revenue - payments (V2)",
+      "LineNum": 2
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "789",
+          "name": "Sales Tax Payable"
+        }
+      },
+      "Amount": 165.00,
+      "Description": "VAT on direct payments (V2)",
+      "LineNum": 3
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Debit",
+        "AccountRef": {
+          "value": "101",
+          "name": "Credit Card Clearing"
+        }
+      },
+      "Amount": 1815.00,
+      "Description": "Credit Card payment (V2)",
+      "LineNum": 4
+    }
+  ]
+}

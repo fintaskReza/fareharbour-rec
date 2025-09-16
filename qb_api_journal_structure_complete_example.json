@@ -1,0 +1,174 @@
+{
+  "DocNumber": "JE0001",
+  "TxnDate": "2024-01-15",
+  "Adjustment": false,
+  "Line": [
+    // REVENUE ENTRIES (Credits)
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "123",
+          "name": "Tour Revenue - Whales Watching"
+        }
+      },
+      "Amount": 1500.00,
+      "Description": "Whales Watching revenue - payments (V2)",
+      "LineNum": 1
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "124",
+          "name": "Tour Revenue - Island Tour"
+        }
+      },
+      "Amount": 800.00,
+      "Description": "Island Tour revenue - payments (V2)",
+      "LineNum": 2
+    },
+
+    // FEE REVENUE ENTRIES (Credits)
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "456",
+          "name": "Fee Revenue - Conservation Fee"
+        }
+      },
+      "Amount": 150.00,
+      "Description": "Conservation Fee revenue - payments (V2)",
+      "LineNum": 3
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "457",
+          "name": "Fee Revenue - Booking Fee"
+        }
+      },
+      "Amount": 50.00,
+      "Description": "Booking Fee revenue - payments (V2)",
+      "LineNum": 4
+    },
+
+    // VAT ENTRIES (Credits for payments, Debits for refunds)
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "789",
+          "name": "Sales Tax Payable"
+        }
+      },
+      "Amount": 165.00,
+      "Description": "VAT on direct payments (V2)",
+      "LineNum": 5
+    },
+
+    // PROCESSING FEE ENTRIES (if enabled)
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Debit",
+        "AccountRef": {
+          "value": "890",
+          "name": "Processing Fee Expense"
+        }
+      },
+      "Amount": 45.67,
+      "Description": "Credit Card processing fee expense (V2)",
+      "LineNum": 6
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Credit",
+        "AccountRef": {
+          "value": "101",
+          "name": "Credit Card Clearing"
+        }
+      },
+      "Amount": 45.67,
+      "Description": "Credit Card processing fee adjustment (V2)",
+      "LineNum": 7
+    },
+
+    // PAYMENT ENTRIES (Debits)
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Debit",
+        "AccountRef": {
+          "value": "101",
+          "name": "Credit Card Clearing"
+        }
+      },
+      "Amount": 2319.33,
+      "Description": "Credit Card payment (V2)",
+      "LineNum": 8
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Debit",
+        "AccountRef": {
+          "value": "102",
+          "name": "PayPal Clearing"
+        }
+      },
+      "Amount": 500.00,
+      "Description": "PayPal payment (V2)",
+      "LineNum": 9
+    },
+
+    // REFUND ENTRIES (Debits for revenue refunds)
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Debit",
+        "AccountRef": {
+          "value": "123",
+          "name": "Tour Revenue - Whales Watching"
+        }
+      },
+      "Amount": 200.00,
+      "Description": "Whales Watching revenue - refunds (V2)",
+      "LineNum": 10
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Debit",
+        "AccountRef": {
+          "value": "456",
+          "name": "Fee Revenue - Conservation Fee"
+        }
+      },
+      "Amount": 20.00,
+      "Description": "Conservation Fee revenue - refunds (V2)",
+      "LineNum": 11
+    },
+    {
+      "DetailType": "JournalEntryLineDetail",
+      "JournalEntryLineDetail": {
+        "PostingType": "Debit",
+        "AccountRef": {
+          "value": "789",
+          "name": "Sales Tax Payable"
+        }
+      },
+      "Amount": 22.00,
+      "Description": "VAT on refunds (V2)",
+      "LineNum": 12
+    }
+  ]
+}

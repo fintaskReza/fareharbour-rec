@@ -120,10 +120,18 @@ def quickbooks_mappings_page():
         # Debug: Show raw API response
         if st.sidebar.button("🐛 Debug Raw Response", help="Show raw API response for debugging"):
             debug_raw_response()
+
+        # Debug: Force load accounts with debug info
+        if st.sidebar.button("🐛 Debug Account Loading", help="Force load accounts with detailed debug info"):
+            debug_account_loading()
     else:
         # Show placeholder metrics when no accounts loaded
         st.sidebar.metric("📊 Total Accounts", 0)
         st.sidebar.caption("No accounts loaded yet")
+
+        # Debug: Force load accounts with debug info (when no accounts loaded)
+        if st.sidebar.button("🐛 Debug Account Loading", help="Force load accounts with detailed debug info"):
+            debug_account_loading()
 
     # Initialize session state for mappings if not exists
     if 'qb_mappings_data' not in st.session_state:
@@ -171,12 +179,13 @@ def quickbooks_mappings_page():
 
     with tab3:
         st.subheader("💳 Payment Type Mappings")
+        st.info("💡 **Payment Type Mappings**: Map payment methods to QuickBooks accounts. All account types (Asset, Liability, Revenue, Expense) are available for selection.")
         create_payment_type_mappings_table(payment_types_list)
 
     with tab4:
         st.subheader("🔄 Special Account Mappings")
-        st.info("💡 **Special Account Mappings**: Configure accounts for processing fees and sales VAT that are used across all journal exports.")
-        create_special_mappings_table()
+    st.info("💡 **Special Account Mappings**: Configure accounts for processing fees and sales VAT that are used across all journal exports. All QuickBooks account types (Asset, Liability, Revenue, Expense) are available for selection.")
+    create_special_mappings_table()
 
     # Global save/reset actions
     st.markdown("---")
@@ -725,6 +734,10 @@ def get_quickbooks_accounts():
     """Get QuickBooks account list from database, cache, or fallback"""
     # Check if we have cached accounts
     if hasattr(st.session_state, 'qb_accounts_cache'):
+        debug_mode = st.session_state.get('qb_debug_mode', False)
+        if debug_mode:
+            account_ids = st.session_state.qb_accounts_cache.get('Account IDs', {})
+            st.write(f"🐛 **DEBUG: Using cached accounts with {len(account_ids)} account IDs**")
         return st.session_state.qb_accounts_cache
 
     # Try to load from database first
@@ -734,12 +747,22 @@ def get_quickbooks_accounts():
         st.session_state.qb_accounts_cache = categorized_accounts
         st.session_state.qb_accounts_last_fetch = pd.Timestamp.now()
         st.session_state.qb_accounts_from_db = True
+
+        debug_mode = st.session_state.get('qb_debug_mode', False)
+        if debug_mode:
+            account_ids = categorized_accounts.get('Account IDs', {})
+            st.write(f"🐛 **DEBUG: Loaded {len(accounts_data)} accounts from DB with {len(account_ids)} account IDs**")
+            st.write(f"🐛 **DEBUG: Sample account IDs:** {dict(list(account_ids.items())[:3])}")
+
         st.info("📊 QuickBooks accounts loaded from database")
         return categorized_accounts
 
     # Note: We no longer load accounts from existing mappings to keep dropdowns empty until QBO is loaded
 
     # If no mappings either, return fallback
+    debug_mode = st.session_state.get('qb_debug_mode', False)
+    if debug_mode:
+        st.write("🐛 **DEBUG: No accounts found, using fallback**")
     return get_fallback_accounts()
 
 def get_accounts_from_existing_mappings():
@@ -935,14 +958,16 @@ def create_fee_revenue_mappings_table(fees_list):
             st.rerun()
 
 def create_payment_type_mappings_table(payment_types_list):
-    """Create editable table for payment type to bank/clearing account mappings"""
-    # Use dedicated asset accounts for payment mappings
-    if hasattr(st.session_state, 'qb_asset_accounts'):
-        asset_accounts = st.session_state.qb_asset_accounts
-    else:
-        # Fallback to general accounts if asset accounts not loaded
-        qb_accounts = get_quickbooks_accounts()
-        asset_accounts = qb_accounts.get('Asset Accounts', [])
+    """Create editable table for payment type to account mappings"""
+    # Load all account types for payment mappings
+    qb_accounts = get_quickbooks_accounts()
+    asset_accounts = qb_accounts.get('Asset Accounts', [])
+    liability_accounts = qb_accounts.get('Liability Accounts', [])
+    revenue_accounts = qb_accounts.get('Revenue Accounts', [])
+    expense_accounts = qb_accounts.get('Expense Accounts', [])
+
+    # Check if any accounts are loaded
+    has_accounts = any([asset_accounts, liability_accounts, revenue_accounts, expense_accounts])
 
     # If no payment types from CSV, get payment types from existing mappings
     if not payment_types_list:
@@ -956,14 +981,34 @@ def create_payment_type_mappings_table(payment_types_list):
             st.info("💡 Upload a sales CSV to populate payment type mappings automatically.")
             return
 
-    # Check if asset accounts are loaded
-    asset_accounts_loaded = hasattr(st.session_state, 'qb_asset_accounts') and st.session_state.qb_asset_accounts
-
-    if asset_accounts_loaded:
-        st.success(f"✅ Using {len(asset_accounts)} QuickBooks asset accounts for payment mappings")
+    # Check if accounts are loaded
+    if has_accounts:
+        total_accounts = len(asset_accounts) + len(liability_accounts) + len(revenue_accounts) + len(expense_accounts)
+        st.success(f"✅ Using {total_accounts} QuickBooks accounts for payment mappings (Asset: {len(asset_accounts)}, Liability: {len(liability_accounts)}, Revenue: {len(revenue_accounts)}, Expense: {len(expense_accounts)})")
     else:
-        st.warning("⚠️ **Asset accounts not loaded yet!** Payment type dropdowns will show fallback accounts.")
-        st.info("💰 Click 'Load Asset Accounts' in the sidebar to get real QuickBooks asset accounts for payment mappings.")
+        st.warning("⚠️ **No QuickBooks accounts loaded yet!** Payment type dropdowns will show fallback accounts.")
+        st.info("💰 Click 'Load QuickBooks Accounts' in the sidebar to get all your QuickBooks accounts for payment mappings.")
+
+        # Fallback accounts from all types
+        asset_accounts = [
+            "Cash clearing",
+            "Fareharbour clearing",
+            "Square Cash Clearing",
+            "Undeposited Funds",
+            "Accounts Receivable"
+        ]
+        liability_accounts = [
+            "Accounts Payable",
+            "Credit Card Payable"
+        ]
+        revenue_accounts = [
+            "Payment Revenue",
+            "Other Income"
+        ]
+        expense_accounts = [
+            "Bank Fees",
+            "Processing Fees"
+        ]
 
     # Get existing mappings for this type
     existing_mappings = {
@@ -993,8 +1038,9 @@ def create_payment_type_mappings_table(payment_types_list):
             # This will be called when data changes
             pass
 
-        # Ensure current mapped values are in dropdown options for display
-        all_asset_options = list(set(asset_accounts + [row['QuickBooks Account'] for row in mappings_data if row['QuickBooks Account']]))
+        # Combine all account options for dropdown (include all account types)
+        all_account_options = list(set(asset_accounts + liability_accounts + revenue_accounts + expense_accounts +
+                                     [row['QuickBooks Account'] for row in mappings_data if row['QuickBooks Account']]))
 
         edited_df = st.data_editor(
             pd.DataFrame(mappings_data),
@@ -1003,7 +1049,7 @@ def create_payment_type_mappings_table(payment_types_list):
             column_config={
                 "Payment Type": st.column_config.TextColumn("Payment Type", disabled=True, width="medium"),
                 "QuickBooks Account": st.column_config.SelectboxColumn(
-                    "QuickBooks Account", options=all_asset_options, width="large"
+                    "QuickBooks Account", options=all_account_options, width="large"
                 ),
                 "Status": st.column_config.TextColumn("Status", disabled=True, width="small")
             },
@@ -1022,11 +1068,23 @@ def create_payment_type_mappings_table(payment_types_list):
                 existing = existing_mappings.get(payment_type, {})
                 # Only update if the account has changed
                 if existing.get('quickbooks_account') != qb_account:
+                    # Determine account type based on which account list contains the selected account
+                    if qb_account in asset_accounts:
+                        account_type_category = 'asset'
+                    elif qb_account in liability_accounts:
+                        account_type_category = 'liability'
+                    elif qb_account in revenue_accounts:
+                        account_type_category = 'revenue'
+                    elif qb_account in expense_accounts:
+                        account_type_category = 'expense'
+                    else:
+                        account_type_category = 'other'
+
                     mapping = {
                         'mapping_type': 'payment_type',
                         'fareharbour_item': payment_type,
                         'quickbooks_account': qb_account,
-                        'account_type': 'asset'
+                        'account_type': account_type_category
                     }
                     update_session_mapping(mapping)
                     changes_made = True
@@ -1040,22 +1098,38 @@ def create_special_mappings_table():
     qb_accounts = get_quickbooks_accounts()
     expense_accounts = qb_accounts.get('Expense Accounts', [])
     liability_accounts = qb_accounts.get('Liability Accounts', [])
-    
+    asset_accounts = qb_accounts.get('Asset Accounts', [])
+    revenue_accounts = qb_accounts.get('Revenue Accounts', [])
+
+    # Check if any accounts are loaded
+    has_accounts = any([expense_accounts, liability_accounts, asset_accounts, revenue_accounts])
+
     # If no accounts loaded, use fallback
-    if not expense_accounts:
-        st.warning("⚠️ **No expense accounts loaded yet!** Special mappings will show fallback accounts.")
-        st.info("💡 Click 'Load QuickBooks Accounts' in the sidebar to get real QuickBooks accounts.")
+    if not has_accounts:
+        st.warning("⚠️ **No QuickBooks accounts loaded yet!** Special mappings will show fallback accounts from all account types.")
+        st.info("💡 Click 'Load QuickBooks Accounts' in the sidebar to get all your real QuickBooks accounts (Asset, Liability, Revenue, Expense).")
         expense_accounts = [
             "Processing Fee Expense",
-            "Bank Service Charges", 
-            "Merchant Processing Fees"
+            "Bank Service Charges",
+            "Merchant Processing Fees",
+            "Rounding Difference Expense"
         ]
-    
-    if not liability_accounts:
         liability_accounts = [
             "Sales Tax Payable",
             "VAT Payable",
             "GST Payable"
+        ]
+        asset_accounts = [
+            "Cash clearing",
+            "Fareharbour clearing",
+            "Square Cash Clearing",
+            "Undeposited Funds",
+            "Accounts Receivable"
+        ]
+        revenue_accounts = [
+            "Tour Revenue",
+            "Fee Revenue",
+            "Other Income"
         ]
 
     # Define the special mappings we need
@@ -1063,16 +1137,23 @@ def create_special_mappings_table():
         {
             'mapping_type': 'processing_fee_expense',
             'fareharbour_item': 'Processing Fees',
-            'description': 'Expense account for all payment processing fees (Stripe, PayPal, etc.)',
-            'account_options': expense_accounts,
+            'description': 'Account for all payment processing fees (Stripe, PayPal, etc.)',
+            'account_options': expense_accounts + liability_accounts + asset_accounts + revenue_accounts,
             'suggested_account': 'Processing Fee Expense'
         },
         {
             'mapping_type': 'sales_vat_liability',
             'fareharbour_item': 'Sales VAT',
-            'description': 'Liability account for sales VAT/tax collected from customers',
-            'account_options': liability_accounts,
+            'description': 'Account for sales VAT/tax collected from customers',
+            'account_options': expense_accounts + liability_accounts + asset_accounts + revenue_accounts,
             'suggested_account': 'Sales Tax Payable'
+        },
+        {
+            'mapping_type': 'rounding_difference_expense',
+            'fareharbour_item': 'Rounding Difference',
+            'description': 'Account for rounding differences and penny adjustments',
+            'account_options': expense_accounts + liability_accounts + asset_accounts + revenue_accounts,
+            'suggested_account': 'Rounding Difference Expense'
         }
     ]
 
@@ -1080,7 +1161,7 @@ def create_special_mappings_table():
     existing_mappings = {
         f"{mapping['mapping_type']}_{mapping['fareharbour_item']}": mapping
         for mapping in st.session_state.qb_mappings_data
-        if mapping['mapping_type'] in ['processing_fee_expense', 'sales_vat_liability']
+        if mapping['mapping_type'] in ['processing_fee_expense', 'sales_vat_liability', 'rounding_difference_expense']
     }
 
     # Show explanation
@@ -1088,7 +1169,8 @@ def create_special_mappings_table():
     **Special Account Mappings:**
     - **Processing Fees**: Single expense account for all payment processing fees across all payment types
     - **Sales VAT**: Liability account for VAT/sales tax collected from customers and owed to tax authorities
-    
+    - **Rounding Difference**: Account for rounding differences and penny adjustments in journal entries
+
     These accounts are used globally across all journal exports when the respective features are enabled.
     """)
 
@@ -1115,10 +1197,10 @@ def create_special_mappings_table():
     def on_special_mapping_change():
         pass
 
-    # Combine all account options for dropdown
-    all_account_options = list(set(expense_accounts + liability_accounts + 
-                                 [row['QuickBooks Account'] for row in mappings_data if row['QuickBooks Account']] +
-                                 [row['Suggested Account'] for row in mappings_data]))
+    # Combine all account options for dropdown (include all account types)
+    # Only include currently mapped accounts, remove hardcoded suggested accounts
+    all_account_options = list(set(expense_accounts + liability_accounts + asset_accounts + revenue_accounts +
+                                 [row['QuickBooks Account'] for row in mappings_data if row['QuickBooks Account']]))
 
     edited_df = st.data_editor(
         pd.DataFrame(mappings_data),
@@ -1154,11 +1236,15 @@ def create_special_mappings_table():
             
             # Only update if the account has changed
             if existing.get('quickbooks_account') != qb_account:
-                # Determine account type based on mapping type
-                if mapping_type == 'processing_fee_expense':
+                # Determine account type based on which account list contains the selected account
+                if qb_account in expense_accounts:
                     account_type_category = 'expense'
-                elif mapping_type == 'sales_vat_liability':
+                elif qb_account in liability_accounts:
                     account_type_category = 'liability'
+                elif qb_account in asset_accounts:
+                    account_type_category = 'asset'
+                elif qb_account in revenue_accounts:
+                    account_type_category = 'revenue'
                 else:
                     account_type_category = 'other'
                 
@@ -1168,6 +1254,7 @@ def create_special_mappings_table():
                     'quickbooks_account': qb_account,
                     'account_type': account_type_category
                 }
+                # Update session state and lookup QuickBooks account ID
                 update_session_mapping(mapping)
                 changes_made = True
 
@@ -1185,11 +1272,37 @@ def update_session_mapping(mapping):
     account_ids = qb_accounts.get('Account IDs', {})
     quickbooks_account = mapping.get('quickbooks_account', '')
 
-    # Add account ID to mapping if available
-    if quickbooks_account and quickbooks_account in account_ids:
-        mapping['quickbooks_account_id'] = account_ids[quickbooks_account]
-    else:
-        mapping['quickbooks_account_id'] = ''
+    # DEBUG: Check what's happening with account ID lookup
+    debug_mode = st.session_state.get('qb_debug_mode', False)
+    if debug_mode:
+        st.write(f"🐛 **DEBUG: Looking up ID for '{quickbooks_account}'**")
+        st.write(f"🐛 **DEBUG: Current mapping has ID:** {mapping.get('quickbooks_account_id', 'NONE')}")
+        st.write(f"🐛 **DEBUG: Available account keys:** {list(account_ids.keys())[:5]}...")  # Show first 5
+        st.write(f"🐛 **DEBUG: Account found:** {quickbooks_account in account_ids}")
+
+    # Only look up account ID if it's not already present in the mapping
+    # (preserves IDs that were loaded from database)
+    if quickbooks_account and not mapping.get('quickbooks_account_id'):
+        if quickbooks_account in account_ids:
+            mapping['quickbooks_account_id'] = account_ids[quickbooks_account]
+            if debug_mode:
+                st.write(f"🐛 **DEBUG: Found and set ID:** {account_ids[quickbooks_account]}")
+        else:
+            mapping['quickbooks_account_id'] = ''
+            if debug_mode:
+                # Special debug for the problematic accounts
+                if quickbooks_account in ['Cash clearing', 'Fareharbour clearing']:
+                    st.write(f"🐛 **DEBUG: PROBLEM ACCOUNT '{quickbooks_account}' not found!**")
+                    st.write(f"🐛 **DEBUG: Total accounts in cache:** {len(account_ids)}")
+                    similar_accounts = [acc for acc in account_ids.keys() if quickbooks_account.lower() in acc.lower()]
+                    if similar_accounts:
+                        st.write(f"🐛 **DEBUG: Similar accounts found:** {similar_accounts}")
+                    else:
+                        st.write(f"🐛 **DEBUG: No similar accounts found**")
+                else:
+                    st.write(f"🐛 **DEBUG: No ID found for '{quickbooks_account}' - keeping empty**")
+    elif debug_mode:
+        st.write(f"🐛 **DEBUG: Keeping existing ID:** {mapping.get('quickbooks_account_id', 'NONE')}")
 
     # Update existing or add new
     existing_index = None
@@ -1549,7 +1662,7 @@ def show_mapping_summary():
     tour_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'tour_revenue' and m.get('quickbooks_account')]
     fee_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'fee_revenue' and m.get('quickbooks_account')]
     payment_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] == 'payment_type' and m.get('quickbooks_account')]
-    special_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] in ['processing_fee_expense', 'sales_vat_liability'] and m.get('quickbooks_account')]
+    special_mappings = [m for m in st.session_state.qb_mappings_data if m['mapping_type'] in ['processing_fee_expense', 'sales_vat_liability', 'rounding_difference_expense'] and m.get('quickbooks_account')]
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -1587,5 +1700,69 @@ def show_mapping_summary():
                 for mapping in special_mappings:
                     account_id = mapping.get('quickbooks_account_id', '')
                     id_info = f" (ID: {account_id})" if account_id else ""
-                    mapping_type_display = "Processing Fees" if mapping['mapping_type'] == 'processing_fee_expense' else "Sales VAT"
+                    if mapping['mapping_type'] == 'processing_fee_expense':
+                        mapping_type_display = "Processing Fees"
+                    elif mapping['mapping_type'] == 'sales_vat_liability':
+                        mapping_type_display = "Sales VAT"
+                    elif mapping['mapping_type'] == 'rounding_difference_expense':
+                        mapping_type_display = "Rounding Difference"
+                    else:
+                        mapping_type_display = mapping['mapping_type']
                     st.write(f"• {mapping_type_display} → {mapping['quickbooks_account']}{id_info}")
+
+def debug_account_loading():
+    """Debug function to manually load and inspect QuickBooks accounts"""
+    st.write("### 🐛 Account Loading Debug")
+
+    # Clear any cached accounts first
+    if hasattr(st.session_state, 'qb_accounts_cache'):
+        del st.session_state.qb_accounts_cache
+        st.write("✅ Cleared cached accounts")
+
+    # Load from database
+    st.write("**Loading accounts from database...**")
+    accounts_data = load_quickbooks_accounts_from_db()
+
+    if accounts_data:
+        st.write(f"✅ Found {len(accounts_data)} accounts in database")
+
+        # Show first few accounts
+        st.write("**First 5 accounts:**")
+        for i, acc in enumerate(accounts_data[:5]):
+            st.write(f"  {i+1}. {acc.get('Name', 'Unknown')} (ID: {acc.get('Id', 'N/A')})")
+
+        # Categorize them
+        st.write("**Categorizing accounts...**")
+        categorized = categorize_quickbooks_accounts(accounts_data)
+
+        # Check account IDs
+        account_ids = categorized.get('Account IDs', {})
+        st.write(f"✅ Built account IDs dictionary with {len(account_ids)} entries")
+
+        # Show some account ID mappings
+        st.write("**Sample Account ID mappings:**")
+        for i, (name, acc_id) in enumerate(list(account_ids.items())[:5]):
+            st.write(f"  {i+1}. '{name}' → '{acc_id}'")
+
+        # Test specific accounts from mappings (including the problematic ones)
+        test_accounts = ['Cash clearing', 'Fareharbour clearing', 'Square FH payments', 'Square Cash Clearing', 'Plooto Clearing', 'Fareharbour Refund Reserve']
+        st.write("**Testing specific account lookups:**")
+        for test_acc in test_accounts:
+            found = test_acc in account_ids
+            acc_id = account_ids.get(test_acc, 'NOT FOUND')
+            status = "✅ FOUND" if found else "❌ NOT FOUND"
+            st.write(f"  '{test_acc}': {status} (ID: {acc_id})")
+
+        # Store in session state
+        st.session_state.qb_accounts_cache = categorized
+        st.session_state.qb_accounts_last_fetch = pd.Timestamp.now()
+        st.session_state.qb_accounts_from_db = True
+
+        st.success("✅ Accounts loaded and cached in session state")
+
+    else:
+        st.error("❌ No accounts found in database")
+        st.write("**Troubleshooting:**")
+        st.write("1. Check if QuickBooks accounts have been loaded via API")
+        st.write("2. Verify database connection")
+        st.write("3. Check quickbooks_accounts table")

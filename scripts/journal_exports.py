@@ -572,6 +572,10 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df, include_processing_fees
         # Convert to DataFrame
         if journal_entries:
             journal_df = pd.DataFrame(journal_entries)
+
+            # Note: V1 journal is for display/CSV export only
+            # Only save to database if this is the final version being sent to QuickBooks
+
             return journal_df, total_vat_payments, total_vat_refunds, total_payments_by_type, total_processing_fees_by_type, net_payments_by_type
         else:
             return pd.DataFrame(), 0, 0, {}, {}, {}
@@ -602,6 +606,634 @@ def calculate_proportional_fees_v2(subtotal_paid, subtotal_total, total_fees_for
     proportion = min(proportion, 1.0)
     
     return proportion * total_fees_for_booking
+
+
+def create_enhanced_quickbooks_journal_api_v2(pivot_df, raw_df, include_processing_fees=False):
+    """Create V2 QuickBooks API-compatible JournalEntry objects (JSON format for API integration) - excludes affiliate payments received"""
+    try:
+        journal_entries = []
+        entry_date = datetime.now().strftime('%Y-%m-%d')
+
+        # Retrieve QuickBooks account mappings
+        qb_mappings = get_quickbooks_mappings()
+
+        # Get fee mappings for detailed breakdown
+        fee_mappings = execute_query("""
+            SELECT t.name as tour_name, f.name as fee_name, f.per_person_amount
+            FROM tour_fees tf
+            JOIN tours t ON tf.tour_id = t.id
+            JOIN fees f ON tf.fee_id = f.id
+            ORDER BY t.name, f.name
+        """)
+
+        fee_mappings_df = pd.DataFrame(fee_mappings, columns=['tour_name', 'fee_name', 'per_person_amount']) if fee_mappings else pd.DataFrame()
+        if not fee_mappings_df.empty:
+            fee_mappings_df['per_person_amount'] = pd.to_numeric(fee_mappings_df['per_person_amount'], errors='coerce').fillna(0)
+
+        entry_number = 1
+        total_vat_amount = 0
+
+        # V2: All data passed in is already filtered to exclude affiliate payments received
+        # Use all remaining bookings (no need to separate by Affiliate column since V2 filter handles this)
+        direct_bookings = raw_df.copy()
+
+        # Separate payments and refunds
+        payments_df = raw_df[raw_df['Payment or Refund'] == 'Payment'].copy()
+        refunds_df = raw_df[raw_df['Payment or Refund'] == 'Refund'].copy()
+
+        # Calculate total VAT from direct bookings - separate payments and refunds
+        payments_only_df = direct_bookings[direct_bookings['Payment or Refund'] == 'Payment']
+        refunds_only_df = direct_bookings[direct_bookings['Payment or Refund'] == 'Refund']
+
+        total_vat_payments = 0
+        total_vat_refunds = 0
+
+        if not payments_only_df.empty and 'Tax Paid' in payments_only_df.columns:
+            total_vat_payments = pd.to_numeric(payments_only_df['Tax Paid'], errors='coerce').fillna(0).sum()
+
+        if not refunds_only_df.empty and 'Tax Paid' in refunds_only_df.columns:
+            # Refunds are negative, so we take absolute value for VAT refunds
+            total_vat_refunds = abs(pd.to_numeric(refunds_only_df['Tax Paid'], errors='coerce').fillna(0).sum())
+
+        total_vat_amount = total_vat_payments  # Only use payment VAT for journal entry
+
+        # V2 filtering already excludes affiliate payments, so no separate affiliate processing needed
+
+        # Calculate total payments by payment type from ALL bookings (V2 filtered)
+        total_payments_by_type = {}
+        total_processing_fees_by_type = {}  # Track processing fees separately
+
+        # Process all V2-filtered bookings payments
+        for _, row in pivot_df.iterrows():
+            tour_name = row['Tour Name']
+            # Use all V2-filtered booking transactions for payments
+            tour_transactions = direct_bookings[direct_bookings['Item'] == tour_name].copy()
+
+            if not tour_transactions.empty:
+                # Calculate payment breakdown using Subtotal Paid + Tax Paid
+                tour_payment_breakdown = {}
+                tour_processing_fee_breakdown = {}
+
+                for _, transaction in tour_transactions.iterrows():
+                    payment_type = transaction.get('Payment Type', 'Unknown')
+                    subtotal_paid = pd.to_numeric(transaction.get('Subtotal Paid', 0), errors='coerce')
+                    tax_paid = pd.to_numeric(transaction.get('Tax Paid', 0), errors='coerce')
+                    processing_fee = pd.to_numeric(transaction.get('Processing Fee', 0), errors='coerce')
+
+                    # Base payment amount (always use gross amount for clearing accounts)
+                    base_payment = subtotal_paid + tax_paid
+
+                    # Always use gross payment amount for clearing accounts
+                    # Processing fees will be handled as separate credit entries
+
+                    # Aggregate payment amounts (gross)
+                    if payment_type in tour_payment_breakdown:
+                        tour_payment_breakdown[payment_type] += base_payment
+                    else:
+                        tour_payment_breakdown[payment_type] = base_payment
+
+                    # Aggregate processing fees if enabled
+                    if include_processing_fees and processing_fee != 0:
+                        if payment_type in tour_processing_fee_breakdown:
+                            tour_processing_fee_breakdown[payment_type] += processing_fee
+                        else:
+                            tour_processing_fee_breakdown[payment_type] = processing_fee
+
+                # Add to overall totals
+                for payment_type, amount in tour_payment_breakdown.items():
+                    if payment_type in total_payments_by_type:
+                        total_payments_by_type[payment_type] += amount
+                    else:
+                        total_payments_by_type[payment_type] = amount
+
+                # Add processing fees to overall totals
+                for payment_type, fee_amount in tour_processing_fee_breakdown.items():
+                    if payment_type in total_processing_fees_by_type:
+                        total_processing_fees_by_type[payment_type] += fee_amount
+                    else:
+                        total_processing_fees_by_type[payment_type] = fee_amount
+
+        # No separate affiliate payment processing needed - V2 filter excludes these
+
+        # Create ONE consolidated journal entry (V2)
+        je_number = f'JE{entry_number:04d}'
+
+        # Generate journal code using date and time (max 21 chars for QuickBooks)
+        journal_code = datetime.now().strftime('%y%m%d%H%M%S-API_V2')
+
+        # Initialize API-compliant journal entry structure with the date-time journal code
+        api_journal_entry = {
+            "DocNumber": journal_code,  # Use date-time based journal code
+            "TxnDate": entry_date,
+            "Adjustment": False,
+            "Line": []
+        }
+
+        line_num = 1
+
+        # Fee calculation is now done separately for payments and refunds below - V2
+
+        # Define direct payments and refunds for fee calculation
+        direct_payments = direct_bookings[direct_bookings['Payment or Refund'] == 'Payment']
+        direct_refunds = direct_bookings[direct_bookings['Payment or Refund'] == 'Refund']
+
+        # REVENUE SIDE (Credits) - Generate directly from CSV records, not pivot tables
+
+        # 1. Tour Revenue - PAYMENTS (Credits) - V2 Filtered
+        payment_revenue_by_tour = {}
+
+        for _, row in direct_payments.iterrows():
+            tour_name = row.get('Item', 'Unknown Tour')
+            subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
+            subtotal_total = pd.to_numeric(row.get('Subtotal', 0), errors='coerce')
+            guests = pd.to_numeric(row.get('# of Pax', 0), errors='coerce')
+
+            # Calculate total fees for this booking (full booking)
+            total_fees_for_booking = 0
+            if not fee_mappings_df.empty:
+                tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour_name]
+                for _, fee_row in tour_fees.iterrows():
+                    total_fees_for_booking += fee_row['per_person_amount'] * guests
+
+            # Calculate proportional fees based on payment amount
+            proportional_fees = calculate_proportional_fees_v2(subtotal_paid, subtotal_total, float(total_fees_for_booking))
+
+            # Tour revenue for this booking = Subtotal Paid - Proportional Fees
+            booking_tour_revenue = subtotal_paid - proportional_fees
+
+            if booking_tour_revenue > 0:
+                if tour_name in payment_revenue_by_tour:
+                    payment_revenue_by_tour[tour_name] += booking_tour_revenue
+                else:
+                    payment_revenue_by_tour[tour_name] = booking_tour_revenue
+
+        # Create payment revenue entries
+        for tour_name, total_revenue in payment_revenue_by_tour.items():
+            if total_revenue > 0:
+                tour_revenue_mapping = qb_mappings["tour_revenue"].get(tour_name, {})
+                account_id = tour_revenue_mapping.get("account_id", "")
+                account_name = tour_revenue_mapping.get("account", f"Tour Revenue - {tour_name}")
+
+                if account_id:  # Only create entry if we have an account ID
+                    api_journal_entry["Line"].append({
+                        "DetailType": "JournalEntryLineDetail",
+                        "JournalEntryLineDetail": {
+                            "PostingType": "Credit",
+                            "AccountRef": {
+                                "value": account_id,
+                                "name": account_name
+                            }
+                        },
+                        "Amount": round(float(total_revenue), 2),
+                        "Description": f'{tour_name} revenue - payments (V2)',
+                        "LineNum": line_num
+                    })
+                    line_num += 1
+
+        # 2. Tour Revenue - REFUNDS (Debits) - V2 Filtered
+        refund_revenue_by_tour = {}
+
+        for _, row in direct_refunds.iterrows():
+            tour_name = row.get('Item', 'Unknown Tour')
+            subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
+            subtotal_total = pd.to_numeric(row.get('Subtotal', 0), errors='coerce')
+            guests = pd.to_numeric(row.get('# of Pax', 0), errors='coerce')
+
+            # Calculate total fees for this booking (full booking)
+            total_fees_for_booking = 0
+            if not fee_mappings_df.empty:
+                tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour_name]
+                for _, fee_row in tour_fees.iterrows():
+                    total_fees_for_booking += fee_row['per_person_amount'] * guests
+
+            # Calculate proportional fees based on refund amount
+            proportional_fees = calculate_proportional_fees_v2(subtotal_paid, subtotal_total, float(total_fees_for_booking))
+
+            # Tour revenue refund for this booking = Subtotal Paid + Proportional Fees (since subtotal_paid is already negative)
+            # We add proportional fees back because both tour revenue and fee revenue need to be reversed proportionally
+            booking_tour_refund = subtotal_paid + proportional_fees
+
+            if booking_tour_refund < 0:  # Should be negative for refunds
+                if tour_name in refund_revenue_by_tour:
+                    refund_revenue_by_tour[tour_name] += booking_tour_refund
+                else:
+                    refund_revenue_by_tour[tour_name] = booking_tour_refund
+
+        # Create refund revenue entries (debits)
+        for tour_name, total_refund in refund_revenue_by_tour.items():
+            if total_refund < 0:  # Confirm it's a refund
+                tour_revenue_mapping = qb_mappings["tour_revenue"].get(tour_name, {})
+                account_id = tour_revenue_mapping.get("account_id", "")
+                account_name = tour_revenue_mapping.get("account", f"Tour Revenue - {tour_name}")
+
+                if account_id:  # Only create entry if we have an account ID
+                    api_journal_entry["Line"].append({
+                        "DetailType": "JournalEntryLineDetail",
+                        "JournalEntryLineDetail": {
+                            "PostingType": "Debit",
+                            "AccountRef": {
+                                "value": account_id,
+                                "name": account_name
+                            }
+                        },
+                        "Amount": round(abs(float(total_refund)), 2),  # Make positive for debit
+                        "Description": f'{tour_name} revenue - refunds (V2)',
+                        "LineNum": line_num
+                    })
+                    line_num += 1
+
+        # 2. Affiliate revenue is handled through commission expense entries below
+        # No separate affiliate revenue entries needed
+
+        # 3. Fee Revenue - PAYMENTS (Credits) and REFUNDS (Debits) - Split separately - V2
+        # Calculate fee revenue from payments (positive) - using proportional fees
+        fee_revenue_payments = {}
+        for _, row in direct_payments.iterrows():
+            tour_name = row.get('Item', 'Unknown Tour')
+            subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
+            subtotal_total = pd.to_numeric(row.get('Subtotal', 0), errors='coerce')
+            guests = pd.to_numeric(row.get('# of Pax', 0), errors='coerce')
+
+            if not fee_mappings_df.empty and guests > 0:
+                tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour_name]
+
+                # Calculate total fees for this booking (full booking)
+                total_fees_for_booking = 0
+                for _, fee_row in tour_fees.iterrows():
+                    total_fees_for_booking += fee_row['per_person_amount'] * guests
+
+                # Calculate proportional fees
+                proportional_total_fees = calculate_proportional_fees_v2(subtotal_paid, subtotal_total, float(total_fees_for_booking))
+
+                # Distribute proportional fees across individual fee types
+                if total_fees_for_booking > 0:
+                    for _, fee_row in tour_fees.iterrows():
+                        full_fee_amount = fee_row['per_person_amount'] * guests
+                        fee_proportion = full_fee_amount / total_fees_for_booking
+                        proportional_fee_amount = proportional_total_fees * fee_proportion
+
+                        if proportional_fee_amount > 0:
+                            fee_name = fee_row['fee_name']
+                            if fee_name in fee_revenue_payments:
+                                fee_revenue_payments[fee_name] += proportional_fee_amount
+                            else:
+                                fee_revenue_payments[fee_name] = proportional_fee_amount
+
+        # Create fee revenue entries for payments (credits)
+        for fee_name, fee_amount in fee_revenue_payments.items():
+            if fee_amount > 0:
+                fee_revenue_mapping = qb_mappings['fee_revenue'].get(fee_name, {})
+                account_id = fee_revenue_mapping.get('account_id', "")
+                account_name = fee_revenue_mapping.get('account', f'Fee Revenue - {fee_name}')
+
+                if account_id:  # Only create entry if we have an account ID
+                    api_journal_entry["Line"].append({
+                        "DetailType": "JournalEntryLineDetail",
+                        "JournalEntryLineDetail": {
+                            "PostingType": "Credit",
+                            "AccountRef": {
+                                "value": account_id,
+                                "name": account_name
+                            }
+                        },
+                        "Amount": round(float(fee_amount), 2),
+                        "Description": f'{fee_name} revenue - payments (V2)',
+                        "LineNum": line_num
+                    })
+                    line_num += 1
+
+        # Calculate fee revenue from refunds (negative - create debits) - using proportional fees
+        fee_revenue_refunds = {}
+        for _, row in direct_refunds.iterrows():
+            tour_name = row.get('Item', 'Unknown Tour')
+            subtotal_paid = pd.to_numeric(row.get('Subtotal Paid', 0), errors='coerce')
+            subtotal_total = pd.to_numeric(row.get('Subtotal', 0), errors='coerce')
+            guests = pd.to_numeric(row.get('# of Pax', 0), errors='coerce')
+
+            if not fee_mappings_df.empty and guests > 0:
+                tour_fees = fee_mappings_df[fee_mappings_df['tour_name'] == tour_name]
+
+                # Calculate total fees for this booking (full booking)
+                total_fees_for_booking = 0
+                for _, fee_row in tour_fees.iterrows():
+                    total_fees_for_booking += fee_row['per_person_amount'] * guests
+
+                # Calculate proportional fees (using absolute value for refunds)
+                proportional_total_fees = calculate_proportional_fees_v2(subtotal_paid, subtotal_total, float(total_fees_for_booking))
+
+                # Distribute proportional fees across individual fee types
+                if total_fees_for_booking > 0:
+                    for _, fee_row in tour_fees.iterrows():
+                        full_fee_amount = fee_row['per_person_amount'] * guests
+                        fee_proportion = full_fee_amount / total_fees_for_booking
+                        proportional_fee_amount = proportional_total_fees * fee_proportion
+
+                        if proportional_fee_amount > 0:
+                            fee_name = fee_row['fee_name']
+                            if fee_name in fee_revenue_refunds:
+                                fee_revenue_refunds[fee_name] += proportional_fee_amount
+                            else:
+                                fee_revenue_refunds[fee_name] = proportional_fee_amount
+
+        # Create fee revenue entries for refunds (debits)
+        for fee_name, fee_amount in fee_revenue_refunds.items():
+            if fee_amount > 0:
+                fee_revenue_mapping = qb_mappings['fee_revenue'].get(fee_name, {})
+                account_id = fee_revenue_mapping.get('account_id', "")
+                account_name = fee_revenue_mapping.get('account', f'Fee Revenue - {fee_name}')
+
+                if account_id:  # Only create entry if we have an account ID
+                    api_journal_entry["Line"].append({
+                        "DetailType": "JournalEntryLineDetail",
+                        "JournalEntryLineDetail": {
+                            "PostingType": "Debit",
+                            "AccountRef": {
+                                "value": account_id,
+                                "name": account_name
+                            }
+                        },
+                        "Amount": round(float(fee_amount), 2),
+                        "Description": f'{fee_name} revenue - refunds (V2)',
+                        "LineNum": line_num
+                    })
+                    line_num += 1
+
+        # 4. No affiliate commission processing needed - V2 filter excludes these
+
+        # 5. VAT Credits - separate payments and refunds - V2
+        # Get the sales VAT liability account from mappings
+        sales_vat_mapping = qb_mappings.get('sales_vat_liability', {}).get('Sales VAT', {})
+        sales_vat_account_id = sales_vat_mapping.get('account_id', "")
+        sales_vat_account_name = sales_vat_mapping.get('account', 'Sales Tax Payable')
+
+        if total_vat_payments > 0 and sales_vat_account_id:
+            api_journal_entry["Line"].append({
+                "DetailType": "JournalEntryLineDetail",
+                "JournalEntryLineDetail": {
+                    "PostingType": "Credit",
+                    "AccountRef": {
+                        "value": sales_vat_account_id,
+                        "name": sales_vat_account_name
+                    }
+                },
+                "Amount": round(float(total_vat_payments), 2),
+                "Description": 'VAT on direct payments (V2)',
+                "LineNum": line_num
+            })
+            line_num += 1
+
+        # Add VAT refund entry if there are refunds
+        if total_vat_refunds > 0 and sales_vat_account_id:
+            api_journal_entry["Line"].append({
+                "DetailType": "JournalEntryLineDetail",
+                "JournalEntryLineDetail": {
+                    "PostingType": "Debit",
+                    "AccountRef": {
+                        "value": sales_vat_account_id,
+                        "name": sales_vat_account_name
+                    }
+                },
+                "Amount": round(float(total_vat_refunds), 2),
+                "Description": 'VAT on refunds (V2)',
+                "LineNum": line_num
+            })
+            line_num += 1
+
+        # 6. Processing Fee Expenses (if enabled) - V2
+        if include_processing_fees:
+            for payment_type, total_processing_fee in total_processing_fees_by_type.items():
+                if total_processing_fee != 0:
+                    # Get the payment account for this payment type
+                    payment_mapping = qb_mappings['payment_type'].get(payment_type, {})
+                    payment_account_id = payment_mapping.get('account_id', "")
+                    payment_account_name = payment_mapping.get('account', get_payment_account(payment_type))
+
+                    # Get the processing fee expense account from mappings (single account for all payment types)
+                    processing_fee_mapping = qb_mappings.get('processing_fee_expense', {}).get('Processing Fees', {})
+                    processing_fee_account_id = processing_fee_mapping.get('account_id', "")
+                    processing_fee_account_name = processing_fee_mapping.get('account', 'Processing Fee Expense')
+
+                    if total_processing_fee < 0 and payment_account_id and processing_fee_account_id:
+                        # Payment processing fees (negative) - expense to us
+                        # 1. Debit: Processing Fee Expense
+                        api_journal_entry["Line"].append({
+                            "DetailType": "JournalEntryLineDetail",
+                            "JournalEntryLineDetail": {
+                                "PostingType": "Debit",
+                                "AccountRef": {
+                                    "value": processing_fee_account_id,
+                                    "name": processing_fee_account_name
+                                }
+                            },
+                            "Amount": round(abs(float(total_processing_fee)), 2),
+                            "Description": f'{payment_type} processing fee expense (V2)',
+                            "LineNum": line_num
+                        })
+                        line_num += 1
+
+                        # 2. Credit: Reduce Payment Clearing Account
+                        api_journal_entry["Line"].append({
+                            "DetailType": "JournalEntryLineDetail",
+                            "JournalEntryLineDetail": {
+                                "PostingType": "Credit",
+                                "AccountRef": {
+                                    "value": payment_account_id,
+                                    "name": payment_account_name
+                                }
+                            },
+                            "Amount": round(abs(float(total_processing_fee)), 2),
+                            "Description": f'{payment_type} processing fee adjustment (V2)',
+                            "LineNum": line_num
+                        })
+                        line_num += 1
+                    elif total_processing_fee > 0 and payment_account_id and processing_fee_account_id:
+                        # Refund processing fees (positive) - refund to us
+                        # 1. Credit: Reduce Processing Fee Expense
+                        api_journal_entry["Line"].append({
+                            "DetailType": "JournalEntryLineDetail",
+                            "JournalEntryLineDetail": {
+                                "PostingType": "Credit",
+                                "AccountRef": {
+                                    "value": processing_fee_account_id,
+                                    "name": processing_fee_account_name
+                                }
+                            },
+                            "Amount": round(float(total_processing_fee), 2),
+                            "Description": f'{payment_type} processing fee refund (V2)',
+                            "LineNum": line_num
+                        })
+                        line_num += 1
+
+                        # 2. Debit: Increase Payment Clearing Account
+                        api_journal_entry["Line"].append({
+                            "DetailType": "JournalEntryLineDetail",
+                            "JournalEntryLineDetail": {
+                                "PostingType": "Debit",
+                                "AccountRef": {
+                                    "value": payment_account_id,
+                                    "name": payment_account_name
+                                }
+                            },
+                            "Amount": round(float(total_processing_fee), 2),
+                            "Description": f'{payment_type} processing fee refund adjustment (V2)',
+                            "LineNum": line_num
+                        })
+                        line_num += 1
+
+        # PAYMENT SIDE (Debits) - All payments in one entry (V2)
+
+        # 1. Direct booking payments
+        for payment_type, total_amount in total_payments_by_type.items():
+            if total_amount > 0:
+                payment_mapping = qb_mappings['payment_type'].get(payment_type, {})
+                payment_account_id = payment_mapping.get('account_id', "")
+                payment_account_name = payment_mapping.get('account', get_payment_account(payment_type))
+
+                if payment_account_id:  # Only create entry if we have an account ID
+                    api_journal_entry["Line"].append({
+                        "DetailType": "JournalEntryLineDetail",
+                        "JournalEntryLineDetail": {
+                            "PostingType": "Debit",
+                            "AccountRef": {
+                                "value": payment_account_id,
+                                "name": payment_account_name
+                            }
+                        },
+                        "Amount": round(float(total_amount), 2),
+                        "Description": f'{payment_type} payment (V2)',
+                        "LineNum": line_num
+                    })
+                    line_num += 1
+
+        # 2. No affiliate payment receipts processing needed - V2 filter excludes these
+
+        # Balance Check and Smart Rounding Adjustment (API V2)
+        rounding_adjustment_info = ""
+
+        if api_journal_entry["Line"]:
+            # Calculate total debits and credits
+            total_debits = 0
+            total_credits = 0
+
+            for line in api_journal_entry["Line"]:
+                amount = float(line["Amount"])
+                posting_type = line["JournalEntryLineDetail"]["PostingType"]
+
+                if posting_type == "Debit":
+                    total_debits += amount
+                elif posting_type == "Credit":
+                    total_credits += amount
+
+            # Check if there's an imbalance
+            difference = total_debits - total_credits
+
+            if abs(difference) > 0.01 and abs(difference) <= 0.05:
+                # Smart rounding adjustment - modify existing account instead of creating new line
+                # Priority order: 1) Cash clearing accounts, 2) Credit card clearing, 3) First payment account
+
+                adjustment_applied = False
+                adjusted_account = ""
+
+                # Find the best account to adjust (prefer cash/clearing accounts)
+                preferred_accounts = ['Cash - Operating', 'Credit Card Clearing', 'PayPal Clearing', 'Bank Transfer Clearing']
+
+                # First try to find a preferred clearing account
+                for line in api_journal_entry["Line"]:
+                    account_name = line["JournalEntryLineDetail"]["AccountRef"]["name"]
+                    posting_type = line["JournalEntryLineDetail"]["PostingType"]
+
+                    if any(pref_acc in account_name for pref_acc in preferred_accounts):
+                        current_amount = float(line["Amount"])
+
+                        if difference > 0:
+                            # More debits than credits - need to reduce a debit or increase a credit
+                            if posting_type == "Debit" and current_amount >= abs(difference):
+                                # Reduce the debit amount
+                                line["Amount"] = round(current_amount - abs(difference), 2)
+                                adjustment_applied = True
+                                adjusted_account = account_name
+                                break
+                            elif posting_type == "Credit":
+                                # Increase the credit amount
+                                line["Amount"] = round(current_amount + abs(difference), 2)
+                                adjustment_applied = True
+                                adjusted_account = account_name
+                                break
+                        else:
+                            # More credits than debits - need to reduce a credit or increase a debit
+                            if posting_type == "Credit" and current_amount >= abs(difference):
+                                # Reduce the credit amount
+                                line["Amount"] = round(current_amount - abs(difference), 2)
+                                adjustment_applied = True
+                                adjusted_account = account_name
+                                break
+                            elif posting_type == "Debit":
+                                # Increase the debit amount
+                                line["Amount"] = round(current_amount + abs(difference), 2)
+                                adjustment_applied = True
+                                adjusted_account = account_name
+                                break
+
+                # If no preferred account found, use the first suitable payment account
+                if not adjustment_applied:
+                    for line in api_journal_entry["Line"]:
+                        posting_type = line["JournalEntryLineDetail"]["PostingType"]
+                        current_amount = float(line["Amount"])
+
+                        if difference > 0:
+                            # More debits than credits - need to reduce a debit or increase a credit
+                            if posting_type == "Debit" and current_amount >= abs(difference):
+                                line["Amount"] = round(current_amount - abs(difference), 2)
+                                adjustment_applied = True
+                                adjusted_account = line["JournalEntryLineDetail"]["AccountRef"]["name"]
+                                break
+                            elif posting_type == "Credit":
+                                line["Amount"] = round(current_amount + abs(difference), 2)
+                                adjustment_applied = True
+                                adjusted_account = line["JournalEntryLineDetail"]["AccountRef"]["name"]
+                                break
+                        else:
+                            # More credits than debits - need to reduce a credit or increase a debit
+                            if posting_type == "Credit" and current_amount >= abs(difference):
+                                line["Amount"] = round(current_amount - abs(difference), 2)
+                                adjustment_applied = True
+                                adjusted_account = line["JournalEntryLineDetail"]["AccountRef"]["name"]
+                                break
+                            elif posting_type == "Debit":
+                                line["Amount"] = round(current_amount + abs(difference), 2)
+                                adjustment_applied = True
+                                adjusted_account = line["JournalEntryLineDetail"]["AccountRef"]["name"]
+                                break
+
+                if adjustment_applied:
+                    rounding_adjustment_info = f"✅ Applied smart rounding adjustment of ${abs(difference):.2f} to '{adjusted_account}' account"
+                else:
+                    rounding_adjustment_info = f"⚠️ Could not apply rounding adjustment of ${abs(difference):.2f} - no suitable account found"
+
+            elif abs(difference) > 0.05:
+                # Large imbalance - log warning but don't auto-adjust
+                rounding_adjustment_info = f"⚠️ Large imbalance detected: ${difference:.2f} (Debits: ${total_debits:.2f}, Credits: ${total_credits:.2f})"
+
+            journal_entries.append(api_journal_entry)
+
+        # Calculate net payment totals (gross payments minus processing fees)
+        net_payments_by_type = {}
+        for payment_type, gross_amount in total_payments_by_type.items():
+            processing_fee = total_processing_fees_by_type.get(payment_type, 0)
+            # Processing fees are negative for payments (expenses), so we add them to reduce the gross
+            net_amount = gross_amount + processing_fee  # processing_fee is negative, so this reduces gross
+            net_payments_by_type[payment_type] = net_amount
+
+        # Note: Not saving to database anymore - using date/time as unique ID
+
+        # Return the API-compliant journal entries with rounding adjustment info
+        return journal_entries, total_vat_payments, total_vat_refunds, total_payments_by_type, total_processing_fees_by_type, net_payments_by_type, rounding_adjustment_info
+
+    except Exception as e:
+        st.error(f"❌ Error creating V2 API-compliant QuickBooks journal: {str(e)}")
+        import traceback
+        st.error(f"Details: {traceback.format_exc()}")
+        return [], 0, 0, {}, {}, {}
 
 
 def create_enhanced_quickbooks_journal_v2(pivot_df, raw_df, include_processing_fees=False):
@@ -1071,6 +1703,10 @@ def create_enhanced_quickbooks_journal_v2(pivot_df, raw_df, include_processing_f
         # Convert to DataFrame
         if journal_entries:
             journal_df = pd.DataFrame(journal_entries)
+
+            # Note: V2 journal is for display/CSV export only
+            # The actual journal saving happens in the API_V2 version that gets sent to QuickBooks
+
             # Return both the journal and VAT totals
             return journal_df, total_vat_payments, total_vat_refunds, total_payments_by_type, total_processing_fees_by_type, net_payments_by_type
         else:

@@ -1,11 +1,13 @@
 # Sales Report Analysis View
 import streamlit as st
 import pandas as pd
+import requests
 from datetime import datetime
 from scripts.data_loaders import load_sales_csv_data
 from scripts.database import execute_query
 from scripts.journal_exports import (
     create_enhanced_quickbooks_journal_v2,
+    create_enhanced_quickbooks_journal_api_v2,
     create_v2_detailed_records,
     create_tour_pivot_table,
     get_quickbooks_mappings
@@ -35,6 +37,36 @@ def generate_v2_export(df, pivot_data, include_processing_fees=False):
             # Generate V2 journal and detailed records
             v2_journal_df, total_vat_payments, total_vat_refunds, v2_payment_type_totals, v2_processing_fees_totals, v2_net_payment_totals = create_enhanced_quickbooks_journal_v2(v2_pivot_df, v2_filtered_df, include_processing_fees)
 
+            # Generate API JSON for debugging
+            v2_api_journal_entries, api_vat_payments, api_vat_refunds, api_payment_totals, api_processing_fees, api_net_payments, api_rounding_adjustment = create_enhanced_quickbooks_journal_api_v2(v2_pivot_df, v2_filtered_df, include_processing_fees)
+
+            # Check if API journal is balanced
+            api_balance_status = "❌ Unbalanced"
+            api_balance_details = ""
+
+            if v2_api_journal_entries:
+                journal_entry = v2_api_journal_entries[0]
+                total_debits = 0
+                total_credits = 0
+
+                for line in journal_entry.get('Line', []):
+                    amount = float(line.get('Amount', 0))
+                    posting_type = line.get('JournalEntryLineDetail', {}).get('PostingType', '')
+
+                    if posting_type == 'Debit':
+                        total_debits += amount
+                    elif posting_type == 'Credit':
+                        total_credits += amount
+
+                difference = total_debits - total_credits
+
+                if abs(difference) <= 0.01:
+                    api_balance_status = "✅ Balanced"
+                    api_balance_details = f"Debits: ${total_debits:.2f}, Credits: ${total_credits:.2f}"
+                else:
+                    api_balance_status = "❌ Unbalanced"
+                    api_balance_details = f"Debits: ${total_debits:.2f}, Credits: ${total_credits:.2f}, Difference: ${difference:.2f}"
+
             if not v2_journal_df.empty:
                 # Generate detailed records
                 v2_detailed_records = create_v2_detailed_records(v2_filtered_df)
@@ -49,7 +81,7 @@ def generate_v2_export(df, pivot_data, include_processing_fees=False):
                 st.session_state.v2_net_payment_totals = v2_net_payment_totals
 
                 # Create tabs for exports and previews
-                export_tab, downloads_tab = st.tabs(["📚 Journal Export", "📥 Additional Downloads"])
+                export_tab, api_debug_tab, downloads_tab = st.tabs(["📚 Journal Export", "🔧 API JSON Debug", "📥 Additional Downloads"])
                 
                 with export_tab:
                     # Main journal export - full width
@@ -64,7 +96,83 @@ def generate_v2_export(df, pivot_data, include_processing_fees=False):
                         help="Download V2 QuickBooks journal entries with detailed records",
                         use_container_width=True
                     )
-                    
+
+                    # QuickBooks API posting section
+                    st.markdown("---")
+                    st.markdown("### 🚀 QuickBooks Online Integration")
+
+                    # Check if API journal is available and balanced
+                    api_ready = bool(v2_api_journal_entries and api_balance_status == "✅ Balanced")
+
+                    if api_ready:
+                        col1, col2 = st.columns([3, 1])
+
+                        with col1:
+                            st.success("✅ Journal is balanced and ready for QuickBooks submission")
+
+                        with col2:
+                            if st.button("📤 Post to QuickBooks Online", type="primary", use_container_width=True, key="qb_post_main_tab"):
+                                with st.spinner("Sending journal to QuickBooks..."):
+                                    try:
+                                        # Send the JSON to the n8n webhook
+                                        webhook_url = "https://n8n.fintask.ie/webhook/b3eca2f4-20a8-4826-9f92-b26bc7bea86c"
+
+                                        # Prepare the payload
+                                        payload = {
+                                            "journal_entry": v2_api_journal_entries[0],
+                                            "metadata": {
+                                                "source": "FareHarbour Sales Analysis",
+                                                "generated_at": datetime.now().isoformat(),
+                                                "total_lines": len(v2_api_journal_entries[0]['Line']),
+                                                "balance_status": api_balance_status,
+                                                "rounding_adjustment": api_rounding_adjustment
+                                            }
+                                        }
+
+                                        # Make the HTTP POST request
+                                        response = requests.post(
+                                            webhook_url,
+                                            json=payload,
+                                            headers={"Content-Type": "application/json"},
+                                            timeout=30
+                                        )
+
+                                        if response.status_code == 200:
+                                            st.success("✅ Journal successfully posted to QuickBooks Online!")
+
+                                            # Show response details
+                                            try:
+                                                response_data = response.json()
+                                                if 'success' in response_data and response_data['success']:
+                                                    st.info(f"Response: {response_data.get('message', 'Success')}")
+                                                else:
+                                                    st.warning(f"Response: {response_data.get('message', 'Completed with warnings')}")
+                                            except:
+                                                st.info("Journal posted successfully")
+
+                                        else:
+                                            st.error(f"❌ Failed to post journal. HTTP {response.status_code}")
+                                            try:
+                                                error_data = response.json()
+                                                st.error(f"Error details: {error_data.get('message', 'Unknown error')}")
+                                            except:
+                                                st.error(f"Response: {response.text[:200]}")
+
+                                    except requests.exceptions.Timeout:
+                                        st.error("❌ Request timed out. Please try again.")
+                                    except requests.exceptions.ConnectionError:
+                                        st.error("❌ Connection error. Please check your internet connection.")
+                                    except Exception as e:
+                                        st.error(f"❌ Error posting to QuickBooks: {str(e)}")
+
+                    else:
+                        if not v2_api_journal_entries:
+                            st.warning("⚠️ API journal not generated. Please ensure journal generation completes successfully.")
+                        elif api_balance_status != "✅ Balanced":
+                            st.error(f"❌ Cannot post unbalanced journal to QuickBooks. {api_balance_details}")
+                            if api_rounding_adjustment and "⚠️" in api_rounding_adjustment:
+                                st.info("💡 Large imbalances require manual review before posting.")
+
                     # Journal preview - full width with column summations
                     st.markdown("#### 🔍 Journal Preview")
                     
@@ -127,6 +235,141 @@ def generate_v2_export(df, pivot_data, include_processing_fees=False):
                         if len(v2_detailed_records) > 10:
                             st.info(f"Showing first 10 of {len(v2_detailed_records)} records")
                         st.dataframe(preview_df, use_container_width=True)
+
+                with api_debug_tab:
+                    st.markdown("### 🔧 QuickBooks API JSON Debug")
+                    st.markdown("This shows the exact JSON structure that will be sent to the QuickBooks API.")
+
+                    if v2_api_journal_entries:
+                        # Display balance status and rounding adjustment first
+                        st.markdown("#### ⚖️ Journal Balance Status")
+
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown(f"**Status:** {api_balance_status}")
+                        with col2:
+                            st.markdown(f"**Details:** {api_balance_details}")
+
+                        if api_rounding_adjustment and api_rounding_adjustment.strip():
+                            st.markdown(f"**Rounding Adjustment:** {api_rounding_adjustment}")
+
+                        # Display JSON structure
+                        import json
+
+                        st.markdown("#### 📤 API JSON Payload")
+                        st.json(v2_api_journal_entries[0])  # Show first journal entry
+
+                        # Show summary info
+                        st.markdown("#### 📊 Journal Summary")
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Total Lines", len(v2_api_journal_entries[0]['Line']))
+                        with col2:
+                            st.metric("VAT Payments", f"${api_vat_payments:.2f}")
+                        with col3:
+                            st.metric("VAT Refunds", f"${api_vat_refunds:.2f}")
+                        with col4:
+                            st.metric("Payment Types", len(api_payment_totals))
+
+                        # Show raw JSON text
+                        st.markdown("#### 📝 Raw JSON Text")
+                        st.code(json.dumps(v2_api_journal_entries[0], indent=2), language='json')
+
+                        # QuickBooks posting and download buttons
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.download_button(
+                                label="📥 Download API JSON",
+                                data=json.dumps(v2_api_journal_entries[0], indent=2),
+                                file_name=f"qb_api_journal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                                mime='application/json',
+                                help="Download the JSON payload for QuickBooks API",
+                                use_container_width=True
+                            )
+
+                        with col2:
+                            if api_balance_status == "✅ Balanced":
+                                if st.button("📤 Post to QuickBooks Online", type="primary", use_container_width=True, key="qb_post_debug_tab"):
+                                    with st.spinner("Sending journal to QuickBooks..."):
+                                        try:
+                                            # Send the JSON to the n8n webhook
+                                            webhook_url = "https://n8n.fintask.ie/webhook/b3eca2f4-20a8-4826-9f92-b26bc7bea86c"
+
+                                            # Prepare the payload
+                                            payload = {
+                                                "journal_entry": v2_api_journal_entries[0],
+                                                "metadata": {
+                                                    "source": "FareHarbour Sales Analysis - Debug Tab",
+                                                    "generated_at": datetime.now().isoformat(),
+                                                    "total_lines": len(v2_api_journal_entries[0]['Line']),
+                                                    "balance_status": api_balance_status,
+                                                    "rounding_adjustment": api_rounding_adjustment
+                                                }
+                                            }
+
+                                            # Make the HTTP POST request
+                                            response = requests.post(
+                                                webhook_url,
+                                                json=payload,
+                                                headers={"Content-Type": "application/json"},
+                                                timeout=30
+                                            )
+
+                                            if response.status_code == 200:
+                                                st.success("✅ Journal successfully posted to QuickBooks Online!")
+
+                                                # Show response details
+                                                try:
+                                                    response_data = response.json()
+                                                    if 'success' in response_data and response_data['success']:
+                                                        st.info(f"Response: {response_data.get('message', 'Success')}")
+                                                    else:
+                                                        st.warning(f"Response: {response_data.get('message', 'Completed with warnings')}")
+                                                except:
+                                                    st.info("Journal posted successfully")
+
+                                            else:
+                                                st.error(f"❌ Failed to post journal. HTTP {response.status_code}")
+                                                try:
+                                                    error_data = response.json()
+                                                    st.error(f"Error details: {error_data.get('message', 'Unknown error')}")
+                                                except:
+                                                    st.error(f"Response: {response.text[:200]}")
+
+                                        except requests.exceptions.Timeout:
+                                            st.error("❌ Request timed out. Please try again.")
+                                        except requests.exceptions.ConnectionError:
+                                            st.error("❌ Connection error. Please check your internet connection.")
+                                        except Exception as e:
+                                            st.error(f"❌ Error posting to QuickBooks: {str(e)}")
+                            else:
+                                st.error("❌ Cannot post unbalanced journal to QuickBooks")
+
+                        # Show account mappings used
+                        st.markdown("#### 🔗 Account Mappings Used")
+                        qb_mappings = get_quickbooks_mappings()
+
+                        # Create a summary of mappings used
+                        used_accounts = {}
+                        for line in v2_api_journal_entries[0]['Line']:
+                            account_ref = line['JournalEntryLineDetail']['AccountRef']
+                            account_id = account_ref['value']
+                            account_name = account_ref['name']
+                            if account_id not in used_accounts:
+                                used_accounts[account_id] = account_name
+
+                        if used_accounts:
+                            mapping_df = pd.DataFrame([
+                                {"Account ID": acc_id, "Account Name": acc_name}
+                                for acc_id, acc_name in used_accounts.items()
+                            ])
+                            st.dataframe(mapping_df, use_container_width=True)
+                        else:
+                            st.info("No account mappings found.")
+
+                    else:
+                        st.warning("⚠️ No API journal entries generated.")
 
 
             else:
