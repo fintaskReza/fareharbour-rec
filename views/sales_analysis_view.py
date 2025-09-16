@@ -5,102 +5,11 @@ from datetime import datetime
 from scripts.data_loaders import load_sales_csv_data
 from scripts.database import execute_query
 from scripts.journal_exports import (
-    create_enhanced_quickbooks_journal,
     create_enhanced_quickbooks_journal_v2,
     create_v2_detailed_records,
     create_tour_pivot_table,
     get_quickbooks_mappings
 )
-
-def generate_v1_export(pivot_data, filtered_df, include_processing_fees=False):
-    """Generate V1 export with all bookings included"""
-    st.markdown("---")
-    st.subheader("📊 V1 Export Results (All Bookings)")
-
-    # Show mapping status
-    qb_mappings = get_quickbooks_mappings()
-    tours_mapped = len(qb_mappings['tour_revenue'])
-    fees_mapped = len(qb_mappings['fee_revenue'])
-    payments_mapped = len(qb_mappings['payment_type'])
-
-    with st.expander("🔗 QuickBooks Mapping Status", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Tour Mappings", tours_mapped)
-        with col2:
-            st.metric("Fee Mappings", fees_mapped)
-        with col3:
-            st.metric("Payment Mappings", payments_mapped)
-
-        if tours_mapped == 0 or payments_mapped == 0:
-            st.warning("⚠️ Some mappings are missing. Journal entries may use fallback account names.")
-
-    # Generate V1 journal
-    journal_df, _, _ = create_enhanced_quickbooks_journal(pivot_data, filtered_df, include_processing_fees)
-
-    if not journal_df.empty:
-        # Show summary
-        unique_entries = journal_df['Entry Number'].nunique()
-        total_line_items = len(journal_df)
-        total_credits = pd.to_numeric(journal_df['Credit'].replace('', '0'), errors='coerce').sum()
-        total_debits = pd.to_numeric(journal_df['Debit'].replace('', '0'), errors='coerce').sum()
-
-        st.success(f"✅ V1 Journal Generated: {unique_entries} consolidated entry with {total_line_items} line items")
-        
-        # Calculate balance
-        v1_balance = total_debits - total_credits
-        balance_status = "⚖️ Balanced" if abs(v1_balance) < 0.01 else f"⚠️ Imbalance: ${v1_balance:.2f}"
-        
-        st.info(f"💰 V1 Totals: Credits: ${total_credits:,.2f} | Debits: ${total_debits:,.2f} | {balance_status}")
-        
-        # Show rounding adjustment if present
-        rounding_entries = journal_df[journal_df['Account'] == 'Rounding Difference']
-        if not rounding_entries.empty:
-            rounding_amount = rounding_entries.iloc[0]['Credit'] if rounding_entries.iloc[0]['Credit'] else rounding_entries.iloc[0]['Debit']
-            st.info(f"🔄 Rounding adjustment applied: ${rounding_amount}")
-
-        # V1 Export buttons
-        st.markdown("### 📥 V1 Export Downloads")
-        v1_col1, v1_col2, v1_col3 = st.columns(3)
-
-        # Store in session state
-        st.session_state.v1_pivot_csv = pivot_data.to_csv(index=False)
-        st.session_state.v1_filtered_csv = filtered_df.to_csv(index=False)
-        st.session_state.v1_journal_csv = journal_df.to_csv(index=False)
-
-        with v1_col1:
-            st.download_button(
-                label="📊 Download V1 Pivot Table",
-                data=st.session_state.v1_pivot_csv,
-                file_name=f"sales_pivot_table_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime='text/csv',
-                help="Download V1 pivot table (all bookings)"
-            )
-
-        with v1_col2:
-            st.download_button(
-                label="📋 Download V1 Filtered Data",
-                data=st.session_state.v1_filtered_csv,
-                file_name=f"sales_filtered_data_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime='text/csv',
-                help="Download V1 filtered raw data"
-            )
-
-        with v1_col3:
-            st.download_button(
-                label="📚 Download V1 Journal",
-                data=st.session_state.v1_journal_csv,
-                file_name=f"quickbooks_journal_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime='text/csv',
-                help="Download V1 QuickBooks journal entries"
-            )
-
-        # Show preview
-        with st.expander("🔍 Preview V1 Journal Entries"):
-            st.dataframe(journal_df, use_container_width=True)
-    else:
-        st.warning("⚠️ No V1 journal entries generated.")
-
 
 def generate_v2_export(df, pivot_data, include_processing_fees=False):
     """Generate V2 export excluding affiliate bookings where payment already received"""
@@ -122,43 +31,11 @@ def generate_v2_export(df, pivot_data, include_processing_fees=False):
         v2_pivot_df = create_tour_pivot_table(v2_filtered_df)
 
         if not v2_pivot_df.empty:
-            st.info(f"📊 V2 Export: {len(v2_filtered_df)} bookings included (excluded {len(df) - len(v2_filtered_df)} affiliate bookings with received payments)")
 
             # Generate V2 journal and detailed records
-            v2_journal_df, total_vat_payments, total_vat_refunds = create_enhanced_quickbooks_journal_v2(v2_pivot_df, v2_filtered_df, include_processing_fees)
+            v2_journal_df, total_vat_payments, total_vat_refunds, v2_payment_type_totals, v2_processing_fees_totals, v2_net_payment_totals = create_enhanced_quickbooks_journal_v2(v2_pivot_df, v2_filtered_df, include_processing_fees)
 
             if not v2_journal_df.empty:
-                # Show V2 journal summary
-                v2_unique_entries = v2_journal_df['Entry Number'].nunique()
-                v2_total_line_items = len(v2_journal_df)
-                v2_total_credits = pd.to_numeric(v2_journal_df['Credit'].replace('', '0'), errors='coerce').sum()
-                v2_total_debits = pd.to_numeric(v2_journal_df['Debit'].replace('', '0'), errors='coerce').sum()
-
-                st.success(f"✅ V2 Journal Generated: {v2_unique_entries} consolidated entry with {v2_total_line_items} line items")
-                
-                # Calculate balance
-                v2_balance = v2_total_debits - v2_total_credits
-                balance_status = "⚖️ Balanced" if abs(v2_balance) < 0.01 else f"⚠️ Imbalance: ${v2_balance:.2f}"
-                
-                st.info(f"💰 V2 Totals: Credits: ${v2_total_credits:,.2f} | Debits: ${v2_total_debits:,.2f} | {balance_status}")
-                
-                # Show rounding adjustment if present
-                rounding_entries = v2_journal_df[v2_journal_df['Account'] == 'Rounding Difference']
-                if not rounding_entries.empty:
-                    rounding_amount = rounding_entries.iloc[0]['Credit'] if rounding_entries.iloc[0]['Credit'] else rounding_entries.iloc[0]['Debit']
-                    st.info(f"🔄 Rounding adjustment applied: ${rounding_amount}")
-
-                # Show VAT breakdown summary
-                if total_vat_payments > 0 or total_vat_refunds > 0:
-                    st.markdown("**VAT Breakdown:**")
-                    vat_col1, vat_col2, vat_col3 = st.columns(3)
-                    with vat_col1:
-                        st.metric("VAT on Payments", f"${total_vat_payments:,.2f}")
-                    with vat_col2:
-                        st.metric("VAT on Refunds", f"${total_vat_refunds:,.2f}")
-                    with vat_col3:
-                        st.metric("Net VAT", f"${total_vat_payments - total_vat_refunds:,.2f}")
-
                 # Generate detailed records
                 v2_detailed_records = create_v2_detailed_records(v2_filtered_df)
 
@@ -167,6 +44,9 @@ def generate_v2_export(df, pivot_data, include_processing_fees=False):
                 st.session_state.v2_filtered_csv = v2_filtered_df.to_csv(index=False)
                 st.session_state.v2_journal_csv = v2_journal_df.to_csv(index=False)
                 st.session_state.v2_detailed_csv = v2_detailed_records.to_csv(index=False)
+                st.session_state.v2_payment_type_totals = v2_payment_type_totals
+                st.session_state.v2_processing_fees_totals = v2_processing_fees_totals
+                st.session_state.v2_net_payment_totals = v2_net_payment_totals
 
                 # Create tabs for exports and previews
                 export_tab, downloads_tab = st.tabs(["📚 Journal Export", "📥 Additional Downloads"])
@@ -248,21 +128,7 @@ def generate_v2_export(df, pivot_data, include_processing_fees=False):
                             st.info(f"Showing first 10 of {len(v2_detailed_records)} records")
                         st.dataframe(preview_df, use_container_width=True)
 
-                st.info("ℹ️ **V2 Export Logic**: Excludes any bookings where 'Receivable from Affiliate' > 0 OR 'Received from Affiliate' > 0, keeping only bookings where affiliate payments are still outstanding or no affiliate involvement.")
 
-                st.markdown("""
-                **📑 V2 Detailed Records includes:**
-                - All booking records used in V2 journal calculations
-                - Key financial fields: Subtotal Paid, Tax Paid, Total Paid
-                - **Individual fee breakdown columns** (e.g., "Booking Fee Amount", "Service Fee Amount")
-                - **Total Fees** (sum of all fees for the booking)
-                - **Subtotal Paid (Ex. Other Fees)** (Subtotal Paid minus Total Fees)
-                - **VAT Split**: VAT_Payments, VAT_Refunds (separate columns based on Payment or Refund)
-                - **Transaction Type** classification (Revenue/Refund) based on Payment or Refund
-                - Payment types and affiliate information
-                - Calculated field: Total Amount (Subtotal + Tax)
-                - V2 filter status indicator
-                """)
             else:
                 st.warning("⚠️ No V2 journal entries generated.")
         else:
@@ -283,12 +149,6 @@ def sales_report_analysis():
     """, unsafe_allow_html=True)
 
     # Initialize session state for downloads
-    if 'v1_pivot_csv' not in st.session_state:
-        st.session_state.v1_pivot_csv = None
-    if 'v1_filtered_csv' not in st.session_state:
-        st.session_state.v1_filtered_csv = None
-    if 'v1_journal_csv' not in st.session_state:
-        st.session_state.v1_journal_csv = None
     if 'v2_pivot_csv' not in st.session_state:
         st.session_state.v2_pivot_csv = None
     if 'v2_filtered_csv' not in st.session_state:
@@ -337,6 +197,30 @@ def sales_report_analysis():
         help="Upload the FareHarbour sales report CSV file"
     )
 
+    # Payout CSV upload in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.header("💰 Payout Report Upload")
+    st.sidebar.markdown("Upload payout CSV for journal comparison")
+    
+    payout_csv_file = st.sidebar.file_uploader(
+        "Upload Payout CSV Report",
+        type=['csv'],
+        help="Upload the payout CSV file to compare with journal payment totals",
+        key="payout_comparison_upload_sidebar"
+    )
+    
+    # Store payout data in session state
+    if payout_csv_file is not None:
+        try:
+            payout_df = pd.read_csv(payout_csv_file)
+            st.session_state.payout_df = payout_df
+            st.sidebar.success(f"✅ Payout CSV loaded ({len(payout_df)} records)")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error loading payout CSV: {str(e)}")
+            st.session_state.payout_df = None
+    elif 'payout_df' not in st.session_state:
+        st.session_state.payout_df = None
+
     # Use uploaded file if provided, otherwise use default
     if sales_csv_file is not None:
         try:
@@ -350,25 +234,6 @@ def sales_report_analysis():
     # Process the data if we have it
     if df is not None and not df.empty:
         try:
-            # Display data overview
-            st.markdown('<div class="metrics-container">', unsafe_allow_html=True)
-            st.subheader("📈 Data Overview")
-
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Records", len(df))
-            with col2:
-                unique_tours = df['Item'].nunique() if 'Item' in df.columns else 0
-                st.metric("Unique Tours", unique_tours)
-            with col3:
-                total_pax = df['# of Pax'].sum() if '# of Pax' in df.columns else 0
-                st.metric("Total Guests", f"{total_pax:,}")
-            with col4:
-                total_revenue = df['Total Paid'].sum() if 'Total Paid' in df.columns else 0
-                st.metric("Total Revenue", f"${total_revenue:,.2f}")
-
-            st.markdown('</div>', unsafe_allow_html=True)
-
             # Create tabs for different analyses
             tab1, tab2 = st.tabs(["📊 Pivot Analysis", "📈 Payment & Affiliate Breakdown"])
 
@@ -380,13 +245,17 @@ def sales_report_analysis():
                 # Create detailed breakdown analysis
                 create_payment_affiliate_breakdown(df)
 
+            # Add payout comparison section as a separate tab/section
+            st.markdown("---")
+            st.subheader("💰 Payout vs Journal Comparison")
+            create_payout_comparison_section(df)
+
         except Exception as e:
             st.error(f"❌ Error processing file: {str(e)}")
             st.info("💡 Make sure the CSV has the correct format with headers starting on the second row.")
     else:
         # Instructions for file format
         if not default_file_loaded:
-            st.error("❌ Failed to load CSV data. Please check the file format.")
             st.info("👆 Upload a FareHarbour Sales Report CSV file to begin analysis")
 
             st.markdown("""
@@ -410,105 +279,30 @@ def sales_report_analysis():
 
 def create_sales_pivot_analysis(df):
     """Create pivot table analysis with filtering"""
-    st.markdown('<div class="filter-container">', unsafe_allow_html=True)
-    st.subheader("🔍 Filters & Analysis")
-
-    # Filtering options
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        # Tour filter
-        tours_available = ['All'] + sorted(df['Item'].unique().tolist()) if 'Item' in df.columns else ['All']
-        selected_tours = st.multiselect(
-            "Select Tours",
-            options=tours_available,
-            default=['All'],
-            help="Filter by specific tours or leave 'All' selected"
-        )
-
-    with col2:
-        # Date range filter (if date columns exist)
-        if 'Created At Date' in df.columns:
-            df['Created At Date'] = pd.to_datetime(df['Created At Date'], errors='coerce')
-            min_date = df['Created At Date'].min()
-            max_date = df['Created At Date'].max()
-            if not pd.isna(min_date) and not pd.isna(max_date):
-                date_range = st.date_input(
-                    "Date Range",
-                    value=(min_date, max_date),
-                    min_value=min_date,
-                    max_value=max_date
-                )
-            else:
-                date_range = None
-        else:
-            date_range = None
-
-    with col3:
-        # Minimum amount filter
-        min_amount = st.number_input(
-            "Minimum Total Amount",
-            min_value=0.0,
-            value=0.0,
-            step=10.0,
-            help="Filter records with total amount >= this value"
-        )
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Apply filters
+    # Use the full dataframe without filtering
     filtered_df = df.copy()
-
-    # Tour filter
-    if 'All' not in selected_tours and selected_tours:
-        filtered_df = filtered_df[filtered_df['Item'].isin(selected_tours)]
-
-    # Date filter
-    if date_range and len(date_range) == 2 and 'Created At Date' in df.columns:
-        start_date, end_date = date_range
-        filtered_df = filtered_df[
-            (filtered_df['Created At Date'] >= pd.Timestamp(start_date)) &
-            (filtered_df['Created At Date'] <= pd.Timestamp(end_date))
-        ]
-
-    # Amount filter
-    if 'Total Paid' in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df['Total Paid'] >= min_amount]
 
     # Create pivot table
     if not filtered_df.empty:
         pivot_data = create_tour_pivot_table(filtered_df)
 
-        # Display pivot table
-        st.subheader("📊 Tour Summary Pivot Table")
-
         if not pivot_data.empty:
-            # Format the pivot table for display
-            display_payment_refund_pivot_table(filtered_df)
 
-            # Export functionality
+            # Export functionality - Automatic V2 Generation
             st.markdown("### 🎯 Export Options")
             include_processing_fees = st.checkbox(
-                "💳 Include Processing Fee Expenses", 
+                "💳 Include Processing Fee Expenses",
                 value=True,
                 help="Include platform processing fees (Stripe, PayPal, etc.) as separate expense lines in journal entries"
             )
-            
+
             if include_processing_fees:
-                st.info("ℹ️ **Processing Fees**: Payment fees (negative) create expense debits + reduce payment clearing. Refund fees (positive) create expense credits + increase payment clearing.")
-            
-            # Create tabs for V1 and V2 exports
-            v2_tab, v1_tab = st.tabs(["🎯 V2 Export (Recommended)", "📊 V1 Export (All Bookings)"])
-            
-            with v2_tab:
-                st.markdown("**V2 Export**: Excludes affiliate bookings where payment already received - recommended for most use cases")
-                if st.button("🎯 **Generate V2 Export** (Filtered Bookings)", type="primary", help="Export excluding affiliate bookings with received payments + detailed records", use_container_width=True):
-                    generate_v2_export(df, pivot_data, include_processing_fees)
-            
-            with v1_tab:
-                st.markdown("**V1 Export**: Includes ALL bookings - use only if you need complete data including affiliate payments already received")
-                if st.button("📊 **Generate V1 Export** (All Bookings)", type="secondary", help="Export including ALL bookings with full QuickBooks journal", use_container_width=True):
-                    generate_v1_export(pivot_data, filtered_df, include_processing_fees)
+                pass  # Processing fees included
+
+            # V2 Export (automatic generation when data is available)
+            # Automatically generate V2 export when data is available
+            with st.spinner("Generating V2 journal export..."):
+                generate_v2_export(df, pivot_data, include_processing_fees)
         else:
             st.warning("⚠️ No data available for pivot table creation.")
     else:
@@ -840,7 +634,7 @@ def display_payment_refund_pivot_table(df):
         if pivot_df.empty:
             st.warning("No data available for pivot table")
             return
-        
+            
         # Create totals
         payment_totals = pivot_df[pivot_df['Payment or Refund'] == 'Payment'].agg({
             'SUM of Ex fee sub paid': 'sum',
@@ -1087,10 +881,10 @@ def create_payment_affiliate_breakdown(df):
             if not affiliate_analysis.empty:
                 csv = affiliate_analysis.to_csv(index=False)
                 st.download_button(
-                    label="💾 Download CSV",
-                    data=csv,
-                    file_name=f"affiliate_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime='text/csv'
+                label="💾 Download CSV",
+                data=csv,
+                file_name=f"affiliate_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime='text/csv'
                 )
 
     with col2:
@@ -1351,3 +1145,280 @@ def create_non_affiliate_refund_analysis(df):
     except Exception as e:
         st.error(f"❌ Error creating refund analysis: {str(e)}")
         return pd.DataFrame()
+
+
+def create_payout_comparison_section(sales_df):
+    """Create payout comparison section with CSV upload and period filtering"""
+    try:
+        # Check if journal data is available in session state
+        journal_available = False
+        journal_df = None
+        journal_version = None
+        payment_type_totals = {}
+        processing_fees_totals = {}
+        net_payment_totals = {}
+        
+        if 'v2_journal_csv' in st.session_state and st.session_state.v2_journal_csv:
+            # Parse V2 journal from CSV string
+            import io
+            journal_df = pd.read_csv(io.StringIO(st.session_state.v2_journal_csv))
+            payment_type_totals = st.session_state.get('v2_payment_type_totals', {})
+            processing_fees_totals = st.session_state.get('v2_processing_fees_totals', {})
+            net_payment_totals = st.session_state.get('v2_net_payment_totals', {})
+            journal_available = True
+            journal_version = "V2"
+        
+        # Check if payout data is available from sidebar
+        payout_df = st.session_state.get('payout_df', None)
+        
+        if payout_df is not None and journal_available:
+            try:
+                # Validate required columns
+                required_columns = ['period_end_date', 'net_payout_amount', 'gross_amount', 'processing_fee_amount']
+                missing_columns = [col for col in required_columns if col not in payout_df.columns]
+                
+                if missing_columns:
+                    st.error(f"❌ Missing required columns in payout CSV: {', '.join(missing_columns)}")
+                    st.info("Expected columns: period_end_date, net_payout_amount, gross_amount, processing_fee_amount")
+                    return
+                
+                # Convert date column
+                payout_df['period_end_date'] = pd.to_datetime(payout_df['period_end_date'], errors='coerce')
+                
+                # Period selection
+                
+                # Use all payouts by default (no date filtering)
+                filtered_payouts = payout_df.copy()
+
+                if not filtered_payouts.empty:
+                    # Show payout table with selection in collapsible container FIRST
+                    with st.expander("💰 Available Payouts", expanded=True):  # Changed to expanded=True for immediate visibility
+                        # Add selection checkboxes (all selected by default)
+                        st.markdown("**Select payouts to include in comparison:**")
+
+                        # Header row
+                        col1, col2, col3, col4, col5 = st.columns([1, 2, 2, 2, 2])
+                        with col1:
+                            st.markdown("**Include**")
+                        with col2:
+                            st.markdown("**Period End Date**")
+                        with col3:
+                            st.markdown("**Gross Amount**")
+                        with col4:
+                            st.markdown("**Processing Fees**")
+                        with col5:
+                            st.markdown("**Net Payout**")
+
+                        selected_payouts = []
+                        for idx, row in filtered_payouts.iterrows():
+                            col1, col2, col3, col4, col5 = st.columns([1, 2, 2, 2, 2])
+
+                            with col1:
+                                selected = st.checkbox("", key=f"payout_{idx}", value=True)  # Default to True (selected)
+                                if selected:
+                                    selected_payouts.append(idx)
+
+                            with col2:
+                                st.write(row['period_end_date'].strftime('%Y-%m-%d'))
+                            with col3:
+                                st.write(f"${row['gross_amount']:,.2f}")
+                            with col4:
+                                st.write(f"${row['processing_fee_amount']:,.2f}")
+                            with col5:
+                                st.write(f"${row['net_payout_amount']:,.2f}")
+
+                        # Calculate totals based on SELECTED payouts only
+                        if selected_payouts:
+                            selected_payout_data = filtered_payouts.loc[selected_payouts]
+                            total_gross = selected_payout_data['gross_amount'].sum()
+                            total_processing_fees = selected_payout_data['processing_fee_amount'].sum()
+                            total_net = selected_payout_data['net_payout_amount'].sum()
+                        else:
+                            # If no payouts selected, use zeros
+                            total_gross = 0
+                            total_processing_fees = 0
+                            total_net = 0
+
+                    # Show Journal vs Payout Comparison below the collapsible section (but above it in visibility)
+                    if payment_type_totals:
+                        st.markdown("### ⚖️ Journal vs Payout Comparison (Credit Card Only)")
+
+                        # Filter for Credit Card payment types only (exclude gift cards)
+                        credit_card_types = [pt for pt in payment_type_totals.keys() if
+                                           ('credit' in pt.lower() or 'card' in pt.lower() or 'visa' in pt.lower() or 'mastercard' in pt.lower() or 'amex' in pt.lower())
+                                           and 'gift' not in pt.lower()]
+
+                        if not credit_card_types:
+                            return
+
+                        # Calculate first day refunds adjustment for credit cards
+                        first_day_cc_refunds = calculate_first_day_credit_card_refunds(sales_df)
+
+                        # Calculate totals for credit card transactions only
+                        cc_payment_totals = {pt: amt for pt, amt in payment_type_totals.items() if pt in credit_card_types}
+                        cc_processing_fees_totals = {pt: amt for pt, amt in processing_fees_totals.items() if pt in credit_card_types} if processing_fees_totals else {}
+                        cc_net_payment_totals = {pt: amt for pt, amt in net_payment_totals.items() if pt in credit_card_types} if net_payment_totals else cc_payment_totals
+
+                        # Create comparison table
+                        comparison_data = []
+
+                        # Journal payment types - use NET totals (after processing fees) for credit cards only
+                        journal_gross_total = sum(cc_payment_totals.values())
+                        journal_processing_fees_total = sum(cc_processing_fees_totals.values()) if cc_processing_fees_totals else 0
+                        journal_net_total = sum(cc_net_payment_totals.values()) if cc_net_payment_totals else journal_gross_total
+
+                        # Show gross payment totals (Credit Card only)
+                        comparison_data.append({
+                            'Source': f'{journal_version} Journal Export',
+                            'Description': 'Credit Card Gross Totals',
+                            'Amount': journal_gross_total,
+                            'Details': ', '.join([f"{pt}: ${amt:,.2f}" for pt, amt in cc_payment_totals.items()])
+                        })
+
+                        # Show processing fees if available (Credit Card only)
+                        if cc_processing_fees_totals and any(fee != 0 for fee in cc_processing_fees_totals.values()):
+                            comparison_data.append({
+                                'Source': f'{journal_version} Journal Export',
+                                'Description': 'Credit Card Processing Fee Expenses',
+                                'Amount': journal_processing_fees_total,
+                                'Details': ', '.join([f"{pt}: ${fee:,.2f}" for pt, fee in cc_processing_fees_totals.items() if fee != 0])
+                            })
+
+                        # Show net payment totals (what should match payout) - Credit Card only
+                        comparison_data.append({
+                            'Source': f'{journal_version} Journal Export',
+                            'Description': 'Credit Card Net Totals (After Fees)',
+                            'Amount': journal_net_total,
+                            'Details': ', '.join([f"{pt}: ${amt:,.2f}" for pt, amt in cc_net_payment_totals.items()]) if cc_net_payment_totals else 'Same as gross (no processing fees)'
+                        })
+
+                        # Add first day refunds adjustment if applicable
+                        if first_day_cc_refunds > 0:
+                            comparison_data.append({
+                                'Source': f'{journal_version} Journal Export',
+                                'Description': 'Plus: First Day Credit Card Refunds',
+                                'Amount': first_day_cc_refunds,
+                                'Details': f"Refunds processed on first day (add back to journal total)"
+                            })
+
+                            # Calculate adjusted journal net (ADD refunds back)
+                            adjusted_journal_net = journal_net_total + first_day_cc_refunds
+                            comparison_data.append({
+                                'Source': f'{journal_version} Journal Export',
+                                'Description': 'Adjusted Credit Card Net (Plus Refunds)',
+                                'Amount': adjusted_journal_net,
+                                'Details': f"${journal_net_total:,.2f} + ${first_day_cc_refunds:,.2f} first day refunds"
+                            })
+                        else:
+                            adjusted_journal_net = journal_net_total
+
+                        # Payout totals (now based on selected payouts only)
+                        comparison_data.append({
+                            'Source': 'Payout Report',
+                            'Description': 'Net Payout Amount',
+                            'Amount': total_net,
+                            'Details': f"Gross: ${total_gross:,.2f}, Fees: ${total_processing_fees:,.2f}"
+                        })
+
+                        # Calculate difference using ADJUSTED journal totals (Credit Card only)
+                        difference = adjusted_journal_net - total_net
+                        comparison_data.append({
+                            'Source': 'Difference',
+                            'Description': 'Credit Card Journal Net - Payout Net',
+                            'Amount': difference,
+                            'Details': f"{'Journal higher' if difference > 0 else 'Payout higher'} by ${abs(difference):,.2f}"
+                        })
+
+                        # Display comparison table
+                        comparison_df = pd.DataFrame(comparison_data)
+                        comparison_df['Amount'] = comparison_df['Amount'].apply(lambda x: f"${x:,.2f}")
+
+                        st.dataframe(
+                            comparison_df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Source": st.column_config.TextColumn("Source", width="small"),
+                                "Description": st.column_config.TextColumn("Description", width="medium"),
+                                "Amount": st.column_config.TextColumn("Amount", width="small"),
+                                "Details": st.column_config.TextColumn("Details", width="large"),
+                            }
+                        )
+
+                        # Show detailed payment type breakdown (Credit Card only)
+                        if len(cc_payment_totals) > 0:
+                            pass  # Payment type breakdown removed
+                            # Payment type breakdown table removed
+
+                            # Excluded payment types info removed
+
+                        # Analysis notes removed
+
+                        # Show net comparison validation
+                        if abs(difference) < 10:  # Within $10
+                            st.success(f"✅ Credit Card Journal Net and Payout Net are closely matched (difference: ${abs(difference):,.2f})")
+                        elif abs(difference) < 100:  # Within $100
+                            st.info(f"ℹ️ Credit Card Journal Net and Payout Net are reasonably close (difference: ${abs(difference):,.2f})")
+                        else:
+                            st.warning(f"⚠️ Significant difference between Credit Card Journal Net and Payout Net (${abs(difference):,.2f}). Review for discrepancies.")
+
+                        # Show processing fee validation if available (Credit Card only)
+                        if cc_processing_fees_totals and any(fee != 0 for fee in cc_processing_fees_totals.values()):
+                            journal_fees_total = abs(journal_processing_fees_total)
+                            payout_fees_total = abs(total_processing_fees)
+                            fee_difference = abs(journal_fees_total - payout_fees_total)
+
+                            # Processing fee comparison (silent)
+                    
+            except Exception as e:
+                st.error(f"❌ Error processing payout CSV: {str(e)}")
+        elif payout_df is not None and not journal_available:
+            pass  # No journal data available
+        elif payout_df is None and journal_available:
+            pass  # No payout data available
+        elif payout_df is None and not journal_available:
+            pass  # Neither data available
+            
+    except Exception as e:
+        st.error(f"❌ Error in payout comparison section: {str(e)}")
+
+
+def calculate_first_day_credit_card_refunds(df):
+    """Calculate the net refund amount for credit card transactions on the first day of the sales period"""
+    try:
+        if df.empty or 'Created At Date' not in df.columns:
+            return 0.0
+        
+        # Convert date column to datetime
+        df_copy = df.copy()
+        df_copy['Created At Date'] = pd.to_datetime(df_copy['Created At Date'], errors='coerce')
+        
+        # Get the first date in the dataset
+        first_date = df_copy['Created At Date'].min()
+        if pd.isna(first_date):
+            return 0.0
+        
+        # Filter for first day refunds only
+        first_day_refunds = df_copy[
+            (df_copy['Created At Date'].dt.date == first_date.date()) &
+            (df_copy['Payment or Refund'] == 'Refund') &
+            (df_copy['Payment Type'].str.lower().str.contains('credit', na=False)) &
+            (~df_copy['Payment Type'].str.lower().str.contains('gift', na=False))
+        ].copy()
+        
+        if first_day_refunds.empty:
+            return 0.0
+        
+        # Sum the "Refund Net" amounts (these should be negative)
+        # Convert to numeric and handle any formatting issues
+        refund_net_col = first_day_refunds['Refund Net'].astype(str).str.replace('$', '').str.replace(',', '').str.replace('"', '')
+        refund_net_amounts = pd.to_numeric(refund_net_col, errors='coerce').fillna(0)
+        total_first_day_refunds = refund_net_amounts.sum()
+        
+        # Return the absolute value since we want the positive adjustment amount
+        return abs(total_first_day_refunds)
+        
+    except Exception as e:
+        st.error(f"❌ Error calculating first day credit card refunds: {str(e)}")
+        return 0.0
+

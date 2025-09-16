@@ -308,13 +308,7 @@ def load_sales_csv_data(file):
             # Also filter out rows where Item is just quotes or empty string
             df = df[~df['Item'].isin(['""', '', 'nan'])]
 
-        # Debug: Show first few rows and column info
-        st.info(f"📊 Loaded {len(df)} records with {len(df.columns)} columns")
-        if len(df) > 0:
-            st.info(f"🎪 Found {df['Item'].nunique()} unique tours")
-            # Show sample of data
-            with st.expander("🔍 Preview First 3 Records"):
-                st.dataframe(df.head(3))
+        # Debug info removed
 
         return df
 

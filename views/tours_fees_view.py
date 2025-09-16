@@ -24,13 +24,33 @@ def manage_tours_and_fees():
         st.subheader("🎪 Tours Management")
 
         # Add new tour
-        col1, col2 = st.columns([3, 1])
+        st.write("**Add New Tour**")
+        new_tour_name = st.text_input("Tour Name", key="new_tour", placeholder="Enter tour name")
+        
+        # Age-based pricing inputs for new tour
+        st.write("**Pricing by Age Group:**")
+        col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
         with col1:
-            new_tour_name = st.text_input("New Tour Name", key="new_tour", placeholder="Enter tour name")
+            new_adult_price = st.number_input("Adult Price", min_value=0.0, step=0.01, key="new_adult_price")
         with col2:
-            if st.button("➕ Add Tour", key="add_tour_btn", type="primary"):
+            new_senior_price = st.number_input("Senior Price", min_value=0.0, step=0.01, key="new_senior_price")
+        with col3:
+            new_youth_price = st.number_input("Youth Price", min_value=0.0, step=0.01, key="new_youth_price")
+        with col4:
+            new_child_price = st.number_input("Child Price", min_value=0.0, step=0.01, key="new_child_price")
+        with col5:
+            if st.button("➕ Add", key="add_tour_btn", type="primary"):
                 if new_tour_name.strip():
-                    result = execute_query("INSERT INTO tours (name) VALUES (:name)", {"name": new_tour_name.strip()})
+                    result = execute_query(
+                        "INSERT INTO tours (name, adult_price, senior_price, youth_price, child_price) VALUES (:name, :adult, :senior, :youth, :child)", 
+                        {
+                            "name": new_tour_name.strip(), 
+                            "adult": new_adult_price,
+                            "senior": new_senior_price,
+                            "youth": new_youth_price,
+                            "child": new_child_price
+                        }
+                    )
                     if result:
                         st.success(f"✅ Tour '{new_tour_name}' added!")
                         st.rerun()
@@ -38,18 +58,36 @@ def manage_tours_and_fees():
                     st.error("❌ Please enter a tour name")
 
         # Edit existing tours
-        tours = execute_query("SELECT id, name FROM tours ORDER BY name")
+        tours = execute_query("""
+            SELECT id, name, 
+                   COALESCE(adult_price, 0.00) as adult_price,
+                   COALESCE(senior_price, 0.00) as senior_price,
+                   COALESCE(youth_price, 0.00) as youth_price,
+                   COALESCE(child_price, 0.00) as child_price
+            FROM tours ORDER BY name
+        """)
 
         if tours:
             st.write(f"**{len(tours)} tours available**")
+            st.write("*Format: Adult | Senior | Youth | Child prices*")
 
             # Initialize session state for tour editing
             if 'tour_edits' not in st.session_state:
-                st.session_state.tour_edits = {tour[0]: {'name': tour[1]} for tour in tours}
+                st.session_state.tour_edits = {
+                    tour[0]: {
+                        'name': tour[1], 
+                        'adult_price': float(tour[2]),
+                        'senior_price': float(tour[3]),
+                        'youth_price': float(tour[4]),
+                        'child_price': float(tour[5])
+                    } for tour in tours
+                }
 
             for tour in tours:
-                tour_id, original_name = tour[0], tour[1]
-                col1, col2 = st.columns([4, 1])
+                tour_id, original_name, adult_price, senior_price, youth_price, child_price = tour
+                
+                # Tour name row
+                col1, col2 = st.columns([5, 1])
                 with col1:
                     new_name = st.text_input(
                         f"Tour {tour_id}",
@@ -57,7 +95,8 @@ def manage_tours_and_fees():
                         key=f"tour_name_{tour_id}",
                         label_visibility="collapsed"
                     )
-                    st.session_state.tour_edits[tour_id] = {'name': new_name}
+                    st.session_state.tour_edits[tour_id] = st.session_state.tour_edits.get(tour_id, {})
+                    st.session_state.tour_edits[tour_id]['name'] = new_name
 
                 with col2:
                     if st.button("🗑️", key=f"delete_tour_{tour_id}", help=f"Delete '{original_name}'"):
@@ -68,13 +107,67 @@ def manage_tours_and_fees():
                                 del st.session_state.tour_edits[tour_id]
                             st.rerun()
 
+                # Age-based pricing row
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    new_adult_price = st.number_input(
+                        f"Adult {tour_id}",
+                        value=st.session_state.tour_edits.get(tour_id, {}).get('adult_price', float(adult_price)),
+                        min_value=0.0,
+                        step=0.01,
+                        key=f"adult_price_{tour_id}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state.tour_edits[tour_id]['adult_price'] = new_adult_price
+
+                with col2:
+                    new_senior_price = st.number_input(
+                        f"Senior {tour_id}",
+                        value=st.session_state.tour_edits.get(tour_id, {}).get('senior_price', float(senior_price)),
+                        min_value=0.0,
+                        step=0.01,
+                        key=f"senior_price_{tour_id}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state.tour_edits[tour_id]['senior_price'] = new_senior_price
+
+                with col3:
+                    new_youth_price = st.number_input(
+                        f"Youth {tour_id}",
+                        value=st.session_state.tour_edits.get(tour_id, {}).get('youth_price', float(youth_price)),
+                        min_value=0.0,
+                        step=0.01,
+                        key=f"youth_price_{tour_id}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state.tour_edits[tour_id]['youth_price'] = new_youth_price
+
+                with col4:
+                    new_child_price = st.number_input(
+                        f"Child {tour_id}",
+                        value=st.session_state.tour_edits.get(tour_id, {}).get('child_price', float(child_price)),
+                        min_value=0.0,
+                        step=0.01,
+                        key=f"child_price_{tour_id}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state.tour_edits[tour_id]['child_price'] = new_child_price
+
+                st.markdown("---")
+
             # Quick actions
             col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("🔄 Reset All", key="reset_tours"):
                     for tour in tours:
                         tour_id = tour[0]
-                        st.session_state.tour_edits[tour_id] = {'name': tour[1]}
+                        st.session_state.tour_edits[tour_id] = {
+                            'name': tour[1], 
+                            'adult_price': float(tour[2]),
+                            'senior_price': float(tour[3]),
+                            'youth_price': float(tour[4]),
+                            'child_price': float(tour[5])
+                        }
                     st.success("✅ Reset all tours!")
                     st.rerun()
 
@@ -84,8 +177,22 @@ def manage_tours_and_fees():
                     for tour_id, edit_data in st.session_state.tour_edits.items():
                         if edit_data['name'].strip():
                             result = execute_query(
-                                "UPDATE tours SET name = :name, updated_at = CURRENT_TIMESTAMP WHERE id = :id",
-                                {"name": edit_data['name'].strip(), "id": tour_id}
+                                """UPDATE tours SET 
+                                   name = :name, 
+                                   adult_price = :adult_price,
+                                   senior_price = :senior_price,
+                                   youth_price = :youth_price,
+                                   child_price = :child_price,
+                                   updated_at = CURRENT_TIMESTAMP 
+                                   WHERE id = :id""",
+                                {
+                                    "name": edit_data['name'].strip(), 
+                                    "adult_price": edit_data['adult_price'],
+                                    "senior_price": edit_data['senior_price'],
+                                    "youth_price": edit_data['youth_price'],
+                                    "child_price": edit_data['child_price'],
+                                    "id": tour_id
+                                }
                             )
                             if result:
                                 updated_count += 1
@@ -220,7 +327,14 @@ def manage_tours_and_fees():
         st.subheader("🔗 Tour-Fee Mappings")
 
         # Get tours and fees
-        tours = execute_query("SELECT id, name FROM tours ORDER BY name")
+        tours = execute_query("""
+            SELECT id, name, 
+                   COALESCE(adult_price, 0.00) as adult_price,
+                   COALESCE(senior_price, 0.00) as senior_price,
+                   COALESCE(youth_price, 0.00) as youth_price,
+                   COALESCE(child_price, 0.00) as child_price
+            FROM tours ORDER BY name
+        """)
         fees = execute_query("SELECT id, name, per_person_amount FROM fees ORDER BY name")
 
         if not tours:
@@ -238,8 +352,9 @@ def manage_tours_and_fees():
         # Create matrix data
         matrix_data = []
         for tour in tours:
-            tour_id, tour_name = tour[0], tour[1]
-            row = {"Tour": tour_name, "tour_id": tour_id}
+            tour_id, tour_name, adult_price, senior_price, youth_price, child_price = tour
+            pricing_display = f"A:${adult_price} S:${senior_price} Y:${youth_price} C:${child_price}"
+            row = {"Tour": f"{tour_name}", "Pricing": pricing_display, "tour_id": tour_id}
             for fee in fees:
                 fee_id, fee_name, fee_amount = fee[0], fee[1], fee[2]
                 row[f"{fee_name} (${fee_amount})"] = (tour_id, fee_id) in existing_set
@@ -251,6 +366,7 @@ def manage_tours_and_fees():
         # Configure data editor
         column_config = {
             "Tour": st.column_config.TextColumn("Tour Name", disabled=True, width="medium"),
+            "Pricing": st.column_config.TextColumn("Age Pricing", disabled=True, width="large"),
             "tour_id": None
         }
 

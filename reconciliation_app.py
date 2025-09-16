@@ -14,22 +14,30 @@ check_authentication()
 
 def main():
     """Main application entry point with navigation"""
+    # Initialize current page if not set
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = "sales_analysis"
+
     # Add navigation in sidebar
     st.sidebar.title("📋 Navigation")
 
-    # Create sidebar navigation buttons
-    if st.sidebar.button("🔍 Reconciliation", type="primary", use_container_width=True):
+    # Create sidebar navigation buttons with dynamic styling
+    if st.sidebar.button("🔍 Reconciliation",
+                       type="primary" if st.session_state.current_page == "reconciliation" else "secondary",
+                       use_container_width=True):
         st.session_state.current_page = "reconciliation"
-    if st.sidebar.button("🎯 Tours & Fees Management", use_container_width=True):
+    if st.sidebar.button("🎯 Tours & Fees Management",
+                       type="primary" if st.session_state.current_page == "tours_fees" else "secondary",
+                       use_container_width=True):
         st.session_state.current_page = "tours_fees"
-    if st.sidebar.button("📊 Sales Report Analysis", use_container_width=True):
+    if st.sidebar.button("📊 Sales Report Analysis",
+                       type="primary" if st.session_state.current_page == "sales_analysis" else "secondary",
+                       use_container_width=True):
         st.session_state.current_page = "sales_analysis"
-    if st.sidebar.button("🔗 QuickBooks Mappings", use_container_width=True):
+    if st.sidebar.button("🔗 QuickBooks Mappings",
+                       type="primary" if st.session_state.current_page == "qb_mappings" else "secondary",
+                       use_container_width=True):
         st.session_state.current_page = "qb_mappings"
-
-    # Initialize current page if not set
-    if "current_page" not in st.session_state:
-        st.session_state.current_page = "reconciliation"
 
     # Add a separator
     st.sidebar.markdown("---")
@@ -52,8 +60,8 @@ def main():
     elif st.session_state.current_page == "qb_mappings":
         quickbooks_mappings_page()
     else:
-        # Default to main reconciliation page
-        main_reconciliation_view()
+        # Default to sales report analysis page
+        sales_report_analysis()
 
 
 if __name__ == "__main__":

@@ -561,18 +561,26 @@ def create_enhanced_quickbooks_journal(pivot_df, raw_df, include_processing_fees
                 # Large imbalance - log warning but don't auto-adjust
                 st.warning(f"⚠️ V1 Journal imbalance detected: ${difference:.2f} (Debits: ${total_debits:.2f}, Credits: ${total_credits:.2f}). Manual review recommended.")
 
+        # Calculate net payment totals (gross payments minus processing fees)
+        net_payments_by_type = {}
+        for payment_type, gross_amount in total_payments_by_type.items():
+            processing_fee = total_processing_fees_by_type.get(payment_type, 0)
+            # Processing fees are negative for payments (expenses), so we add them to reduce the gross
+            net_amount = gross_amount + processing_fee  # processing_fee is negative, so this reduces gross
+            net_payments_by_type[payment_type] = net_amount
+
         # Convert to DataFrame
         if journal_entries:
             journal_df = pd.DataFrame(journal_entries)
-            return journal_df, total_vat_payments, total_vat_refunds
+            return journal_df, total_vat_payments, total_vat_refunds, total_payments_by_type, total_processing_fees_by_type, net_payments_by_type
         else:
-            return pd.DataFrame(), 0, 0
+            return pd.DataFrame(), 0, 0, {}, {}, {}
 
     except Exception as e:
         st.error(f"❌ Error creating enhanced QuickBooks journal: {str(e)}")
         import traceback
         st.error(f"Details: {traceback.format_exc()}")
-        return pd.DataFrame(), 0, 0
+        return pd.DataFrame(), 0, 0, {}, {}, {}
 
 
 def calculate_proportional_fees_v2(subtotal_paid, subtotal_total, total_fees_for_booking):
@@ -1052,19 +1060,27 @@ def create_enhanced_quickbooks_journal_v2(pivot_df, raw_df, include_processing_f
                 # Large imbalance - log warning but don't auto-adjust
                 st.warning(f"⚠️ V2 Journal imbalance detected: ${difference:.2f} (Debits: ${total_debits:.2f}, Credits: ${total_credits:.2f}). Manual review recommended.")
 
+        # Calculate net payment totals (gross payments minus processing fees)
+        net_payments_by_type = {}
+        for payment_type, gross_amount in total_payments_by_type.items():
+            processing_fee = total_processing_fees_by_type.get(payment_type, 0)
+            # Processing fees are negative for payments (expenses), so we add them to reduce the gross
+            net_amount = gross_amount + processing_fee  # processing_fee is negative, so this reduces gross
+            net_payments_by_type[payment_type] = net_amount
+
         # Convert to DataFrame
         if journal_entries:
             journal_df = pd.DataFrame(journal_entries)
             # Return both the journal and VAT totals
-            return journal_df, total_vat_payments, total_vat_refunds
+            return journal_df, total_vat_payments, total_vat_refunds, total_payments_by_type, total_processing_fees_by_type, net_payments_by_type
         else:
-            return pd.DataFrame(), 0, 0
+            return pd.DataFrame(), 0, 0, {}, {}, {}
 
     except Exception as e:
         st.error(f"❌ Error creating V2 QuickBooks journal: {str(e)}")
         import traceback
         st.error(f"Details: {traceback.format_exc()}")
-        return pd.DataFrame(), 0, 0
+        return pd.DataFrame(), 0, 0, {}, {}, {}
 
 
 def create_v2_detailed_records(v2_filtered_df):
